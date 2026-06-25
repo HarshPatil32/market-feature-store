@@ -1,0 +1,6 @@
+SCRUM_BOARD.md
+.cursor/
+
+__pycache__/
+*.pyc
+*.pyo
