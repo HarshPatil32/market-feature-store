@@ -1,6 +1,8 @@
 SCRUM_BOARD.md
 .cursor/
 
+.env
+
 .venv/
 venv/
 
