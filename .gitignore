@@ -1,6 +1,9 @@
 SCRUM_BOARD.md
 .cursor/
 
+.venv/
+venv/
+
 __pycache__/
 *.pyc
 *.pyo
