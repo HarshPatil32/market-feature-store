@@ -7,7 +7,9 @@ from pydantic import ValidationError
 
 from backend.config import Settings, get_settings
 
-VALID_DB_URL = "postgresql+asyncpg://user:password@localhost:5432/market_feature_store"
+VALID_DB_URL = (
+    "postgresql+asyncpg://postgres:changeme@localhost:5433/market_feature_store"
+)
 
 
 @pytest.fixture(autouse=True)
