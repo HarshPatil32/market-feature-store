@@ -1,6 +1,12 @@
 SCRUM_BOARD.md
 .cursor/
 
+.env
+
+.venv/
+venv/
+
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/

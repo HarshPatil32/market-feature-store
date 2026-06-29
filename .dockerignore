@@ -1,0 +1,10 @@
+.env
+.git
+.cursor/
+.venv/
+venv/
+__pycache__
+*.pyc
+tests/
+requirements-dev.txt
+market_feature_store.egg-info/
