@@ -2,12 +2,12 @@
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import TypeGuard, TypeVar
+from typing import Any, TypeGuard, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.storage.models import IngestionRun, RunStatus, Symbol
+from backend.storage.models import IngestionRun, RawMarketData, RunStatus, Symbol
 
 T = TypeVar("T")
 
@@ -145,3 +145,32 @@ class IngestionRunRepository:
         if row is not None:
             await self._session.delete(row)
             await self._session.flush()
+
+
+class RawMarketDataRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        response_payload: dict[str, Any],
+        run_id: int | None = None,
+        symbol_id: int | None = None,
+        source: str | None = None,
+        request_params: dict[str, Any] | None = None,
+    ) -> RawMarketData:
+        row = RawMarketData(
+            response_payload=response_payload,
+            run_id=run_id,
+            symbol_id=symbol_id,
+            source=source,
+            request_params=request_params,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_by_id(self, raw_market_data_id: int) -> RawMarketData | None:
+        return await self._session.get(RawMarketData, raw_market_data_id)
