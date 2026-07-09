@@ -2,9 +2,12 @@
 
 import os
 from collections.abc import AsyncGenerator, Generator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from alembic.command import upgrade
+from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from testcontainers.postgres import PostgresContainer
 
@@ -46,10 +49,17 @@ def override_settings(db_url: str) -> Generator[None, None, None]:
     clear_db_cache()
 
 
+@pytest.fixture(scope="session")
+def _migrated(db_url: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", db_url)
+    upgrade(config, "head")
+
+
 @pytest_asyncio.fixture(scope="session")
-async def engine() -> AsyncGenerator[AsyncEngine, None]:
+async def engine(_migrated: None) -> AsyncGenerator[AsyncEngine, None]:
     eng = get_engine()
-    # TODO: run `alembic upgrade head` once migrations exist.
     yield eng
     await eng.dispose()
 
