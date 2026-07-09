@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.storage.models import (
     CheckSeverity,
     DataQualityCheck,
+    FeatureDefinition,
     IngestionRun,
     MarketBar,
     RawMarketData,
@@ -317,3 +318,72 @@ class DataQualityCheckRepository:
             stmt = stmt.where(DataQualityCheck.severity == severity)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+
+class FeatureDefinitionRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        name: str,
+        version: int,
+        lookback_window: int,
+        active: bool = True,
+    ) -> FeatureDefinition:
+        row = FeatureDefinition(
+            name=name,
+            version=version,
+            lookback_window=lookback_window,
+            active=active,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_by_id(self, feature_definition_id: int) -> FeatureDefinition | None:
+        return await self._session.get(FeatureDefinition, feature_definition_id)
+
+    async def get_by_name_and_version(
+        self,
+        name: str,
+        version: int,
+    ) -> FeatureDefinition | None:
+        result = await self._session.execute(
+            select(FeatureDefinition).where(
+                FeatureDefinition.name == name,
+                FeatureDefinition.version == version,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list(self, *, active_only: bool = False) -> Sequence[FeatureDefinition]:
+        stmt = select(FeatureDefinition).order_by(
+            FeatureDefinition.name,
+            FeatureDefinition.version,
+        )
+        if active_only:
+            stmt = stmt.where(FeatureDefinition.active.is_(True))
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
+    async def set_active(
+        self,
+        feature_definition_id: int,
+        active: bool,
+    ) -> FeatureDefinition | None:
+        row = await self.get_by_id(feature_definition_id)
+        if row is None:
+            return None
+        row.active = active
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def delete(self, feature_definition_id: int) -> None:
+        row = await self.get_by_id(feature_definition_id)
+        if row is not None:
+            await self._session.delete(row)
+            await self._session.flush()

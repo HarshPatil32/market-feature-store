@@ -210,3 +210,35 @@ class DataQualityCheck(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class FeatureDefinition(Base):
+    __tablename__ = "feature_definitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "name",
+            "version",
+            name="uq_feature_definitions_name_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    lookback_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(
+        nullable=False,
+        default=True,
+        server_default=sa.true(),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
