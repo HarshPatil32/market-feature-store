@@ -10,6 +10,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.storage.models import (
+    CheckSeverity,
+    DataQualityCheck,
     IngestionRun,
     MarketBar,
     RawMarketData,
@@ -247,5 +249,71 @@ class MarketBarRepository:
             stmt = stmt.where(MarketBar.timestamp >= start)
         if end is not None:
             stmt = stmt.where(MarketBar.timestamp <= end)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
+
+class DataQualityCheckRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        check_name: str,
+        severity: CheckSeverity,
+        run_id: int | None = None,
+        symbol_id: int | None = None,
+        message: str | None = None,
+        affected_timestamp: datetime | None = None,
+    ) -> DataQualityCheck:
+        row = DataQualityCheck(
+            check_name=check_name,
+            severity=severity,
+            run_id=run_id,
+            symbol_id=symbol_id,
+            message=message,
+            affected_timestamp=affected_timestamp,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def bulk_create(
+        self, rows: Sequence[dict[str, Any]]
+    ) -> Sequence[DataQualityCheck]:
+        created = [DataQualityCheck(**row) for row in rows]
+        self._session.add_all(created)
+        await self._session.flush()
+        # No per-row refresh: flush populates ids and server defaults via RETURNING.
+        return created
+
+    async def get_by_id(self, check_id: int) -> DataQualityCheck | None:
+        return await self._session.get(DataQualityCheck, check_id)
+
+    async def list_by_run(self, run_id: int) -> Sequence[DataQualityCheck]:
+        stmt = (
+            select(DataQualityCheck)
+            .where(DataQualityCheck.run_id == run_id)
+            .order_by(DataQualityCheck.created_at, DataQualityCheck.id)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
+    async def list_by_symbol(
+        self,
+        symbol_id: int,
+        *,
+        severity: CheckSeverity | None = None,
+    ) -> Sequence[DataQualityCheck]:
+        """Return checks for a symbol, newest first (for latest-quality views)."""
+        stmt = (
+            select(DataQualityCheck)
+            .where(DataQualityCheck.symbol_id == symbol_id)
+            .order_by(DataQualityCheck.created_at.desc(), DataQualityCheck.id.desc())
+        )
+        if severity is not None:
+            stmt = stmt.where(DataQualityCheck.severity == severity)
         result = await self._session.execute(stmt)
         return result.scalars().all()

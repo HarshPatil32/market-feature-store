@@ -27,6 +27,12 @@ class RunStatus(str, enum.Enum):
     failed = "failed"
 
 
+class CheckSeverity(str, enum.Enum):
+    info = "info"
+    warning = "warning"
+    error = "error"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -165,4 +171,42 @@ class MarketBar(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class DataQualityCheck(Base):
+    """Immutable audit record for a single validation check result.
+
+    Rows are write-once; there is no updated_at column.
+    """
+
+    __tablename__ = "data_quality_checks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ingestion_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    symbol_id: Mapped[int | None] = mapped_column(
+        ForeignKey("symbols.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Stable check identifier (e.g. negative_prices). 100 chars covers all planned VAL checks.
+    check_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    severity: Mapped[CheckSeverity] = mapped_column(
+        sa.Enum(
+            CheckSeverity,
+            native_enum=False,
+            length=20,
+        ),
+        nullable=False,
+    )
+    message: Mapped[str | None] = mapped_column(Text)
+    # Point-in-time flag for a single bar. Range checks (e.g. missing_trading_days) store
+    # the range start here and encode the range end in message.
+    affected_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     )
