@@ -2,12 +2,14 @@
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import TypeGuard
+from typing import TypeGuard, TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.storage.models import Symbol
+from backend.storage.models import IngestionRun, RunStatus, Symbol
+
+T = TypeVar("T")
 
 
 class _Unset:
@@ -18,7 +20,7 @@ class _Unset:
 _UNSET = _Unset()
 
 
-def _is_provided(value: datetime | None | _Unset) -> TypeGuard[datetime | None]:
+def _is_provided(value: T | _Unset) -> TypeGuard[T]:
     return value is not _UNSET
 
 
@@ -81,6 +83,65 @@ class SymbolRepository:
 
     async def delete(self, symbol_id: int) -> None:
         row = await self.get_by_id(symbol_id)
+        if row is not None:
+            await self._session.delete(row)
+            await self._session.flush()
+
+
+class IngestionRunRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        run_type: str,
+        symbol_id: int | None = None,
+    ) -> IngestionRun:
+        row = IngestionRun(run_type=run_type, symbol_id=symbol_id)
+        self._session.add(row)
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_by_id(self, run_id: int) -> IngestionRun | None:
+        return await self._session.get(IngestionRun, run_id)
+
+    async def update(
+        self,
+        run_id: int,
+        *,
+        status: RunStatus | _Unset = _UNSET,
+        fetched: int | _Unset = _UNSET,
+        inserted: int | _Unset = _UNSET,
+        failed: int | _Unset = _UNSET,
+        error_message: str | None | _Unset = _UNSET,
+        started_at: datetime | None | _Unset = _UNSET,
+        finished_at: datetime | None | _Unset = _UNSET,
+    ) -> IngestionRun | None:
+        row = await self.get_by_id(run_id)
+        if row is None:
+            return None
+        if _is_provided(status):
+            row.status = status
+        if _is_provided(fetched):
+            row.fetched = fetched
+        if _is_provided(inserted):
+            row.inserted = inserted
+        if _is_provided(failed):
+            row.failed = failed
+        if _is_provided(error_message):
+            row.error_message = error_message
+        if _is_provided(started_at):
+            row.started_at = started_at
+        if _is_provided(finished_at):
+            row.finished_at = finished_at
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def delete(self, run_id: int) -> None:
+        row = await self.get_by_id(run_id)
         if row is not None:
             await self._session.delete(row)
             await self._session.flush()
