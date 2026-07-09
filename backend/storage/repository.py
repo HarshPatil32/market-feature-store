@@ -13,6 +13,7 @@ from backend.storage.models import (
     CheckSeverity,
     DataQualityCheck,
     FeatureDefinition,
+    FeatureValue,
     IngestionRun,
     MarketBar,
     RawMarketData,
@@ -387,3 +388,62 @@ class FeatureDefinitionRepository:
         if row is not None:
             await self._session.delete(row)
             await self._session.flush()
+
+
+class FeatureValueRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def upsert(
+        self,
+        *,
+        symbol_id: int,
+        feature_definition_id: int,
+        timestamp: datetime,
+        value: Decimal,
+    ) -> FeatureValue:
+        insert_stmt = pg_insert(FeatureValue).values(
+            symbol_id=symbol_id,
+            feature_definition_id=feature_definition_id,
+            timestamp=timestamp,
+            value=value,
+        )
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["symbol_id", "timestamp", "feature_definition_id"],
+            set_={
+                "value": insert_stmt.excluded.value,
+                "updated_at": func.now(),
+            },
+        ).returning(FeatureValue)
+        result = await self._session.execute(stmt)
+        row = result.scalar_one()
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_by_id(self, feature_value_id: int) -> FeatureValue | None:
+        return await self._session.get(FeatureValue, feature_value_id)
+
+    async def list_by_symbol(
+        self,
+        symbol_id: int,
+        *,
+        feature_definition_id: int | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> Sequence[FeatureValue]:
+        stmt = (
+            select(FeatureValue)
+            .where(FeatureValue.symbol_id == symbol_id)
+            .order_by(FeatureValue.timestamp)
+        )
+        if feature_definition_id is not None:
+            stmt = stmt.where(
+                FeatureValue.feature_definition_id == feature_definition_id
+            )
+        if start is not None:
+            stmt = stmt.where(FeatureValue.timestamp >= start)
+        if end is not None:
+            stmt = stmt.where(FeatureValue.timestamp <= end)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()

@@ -242,3 +242,38 @@ class FeatureDefinition(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+class FeatureValue(Base):
+    __tablename__ = "feature_values"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol_id",
+            "timestamp",
+            "feature_definition_id",
+            name="uq_feature_values_symbol_id_timestamp_feature_definition_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol_id: Mapped[int] = mapped_column(
+        ForeignKey("symbols.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    feature_definition_id: Mapped[int] = mapped_column(
+        ForeignKey("feature_definitions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    value: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
