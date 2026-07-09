@@ -2,12 +2,20 @@
 
 from collections.abc import Sequence
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, TypeGuard, TypeVar
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.storage.models import IngestionRun, RawMarketData, RunStatus, Symbol
+from backend.storage.models import (
+    IngestionRun,
+    MarketBar,
+    RawMarketData,
+    RunStatus,
+    Symbol,
+)
 
 T = TypeVar("T")
 
@@ -174,3 +182,70 @@ class RawMarketDataRepository:
 
     async def get_by_id(self, raw_market_data_id: int) -> RawMarketData | None:
         return await self._session.get(RawMarketData, raw_market_data_id)
+
+
+class MarketBarRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def upsert(
+        self,
+        *,
+        symbol_id: int,
+        timestamp: datetime,
+        timeframe: str,
+        open: Decimal,
+        high: Decimal,
+        low: Decimal,
+        close: Decimal,
+        volume: Decimal,
+    ) -> MarketBar:
+        insert_stmt = pg_insert(MarketBar).values(
+            symbol_id=symbol_id,
+            timestamp=timestamp,
+            timeframe=timeframe,
+            open=open,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+        )
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["symbol_id", "timestamp", "timeframe"],
+            set_={
+                "open": insert_stmt.excluded.open,
+                "high": insert_stmt.excluded.high,
+                "low": insert_stmt.excluded.low,
+                "close": insert_stmt.excluded.close,
+                "volume": insert_stmt.excluded.volume,
+                "updated_at": func.now(),
+            },
+        ).returning(MarketBar)
+        result = await self._session.execute(stmt)
+        row = result.scalar_one()
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
+    async def get_by_id(self, market_bar_id: int) -> MarketBar | None:
+        return await self._session.get(MarketBar, market_bar_id)
+
+    async def list_by_symbol(
+        self,
+        symbol_id: int,
+        *,
+        timeframe: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> Sequence[MarketBar]:
+        stmt = (
+            select(MarketBar)
+            .where(MarketBar.symbol_id == symbol_id, MarketBar.timeframe == timeframe)
+            .order_by(MarketBar.timestamp)
+        )
+        if start is not None:
+            stmt = stmt.where(MarketBar.timestamp >= start)
+        if end is not None:
+            stmt = stmt.where(MarketBar.timestamp <= end)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()

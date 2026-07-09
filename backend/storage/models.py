@@ -2,10 +2,20 @@
 
 import enum
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -119,4 +129,40 @@ class RawMarketData(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+
+
+class MarketBar(Base):
+    __tablename__ = "market_bars"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol_id",
+            "timestamp",
+            "timeframe",
+            name="uq_market_bars_symbol_id_timestamp_timeframe",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol_id: Mapped[int] = mapped_column(
+        ForeignKey("symbols.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    open: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    volume: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
