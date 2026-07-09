@@ -215,7 +215,7 @@ class MarketBarRepository:
             volume=volume,
         )
         stmt = insert_stmt.on_conflict_do_update(
-            index_elements=["symbol_id", "timestamp", "timeframe"],
+            index_elements=["symbol_id", "timeframe", "timestamp"],
             set_={
                 "open": insert_stmt.excluded.open,
                 "high": insert_stmt.excluded.high,

@@ -143,9 +143,9 @@ class MarketBar(Base):
     __table_args__ = (
         UniqueConstraint(
             "symbol_id",
-            "timestamp",
             "timeframe",
-            name="uq_market_bars_symbol_id_timestamp_timeframe",
+            "timestamp",
+            name="uq_market_bars_symbol_id_timeframe_timestamp",
         ),
     )
 
