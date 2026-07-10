@@ -2,17 +2,17 @@
 
 import os
 from collections.abc import AsyncGenerator, Generator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    create_async_engine,
-)
+from alembic.command import upgrade
+from alembic.config import Config
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from testcontainers.postgres import PostgresContainer
 
 from backend.config import get_settings
+from backend.db import clear_db_cache, get_engine
 
 PG_IMAGE = "postgres:16-alpine"
 
@@ -35,6 +35,7 @@ def override_settings(db_url: str) -> Generator[None, None, None]:
     os.environ["DATABASE_URL"] = db_url
     os.environ["PROVIDER_API_KEY"] = "test-key"
     get_settings.cache_clear()
+    clear_db_cache()
     yield
     if original_db is None:
         os.environ.pop("DATABASE_URL", None)
@@ -45,12 +46,20 @@ def override_settings(db_url: str) -> Generator[None, None, None]:
     else:
         os.environ["PROVIDER_API_KEY"] = original_key
     get_settings.cache_clear()
+    clear_db_cache()
+
+
+@pytest.fixture(scope="session")
+def _migrated(db_url: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", db_url)
+    upgrade(config, "head")
 
 
 @pytest_asyncio.fixture(scope="session")
-async def engine(db_url: str) -> AsyncGenerator[AsyncEngine, None]:
-    eng = create_async_engine(db_url, echo=False)
-    # TODO: run `alembic upgrade head` once migrations exist.
+async def engine(_migrated: None) -> AsyncGenerator[AsyncEngine, None]:
+    eng = get_engine()
     yield eng
     await eng.dispose()
 
