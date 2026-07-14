@@ -3,7 +3,12 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from backend.services.symbols import DuplicateSymbolError, add_symbol
+from backend.services.symbols import (
+    DuplicateSymbolError,
+    SymbolNotFoundError,
+    add_symbol,
+    deactivate_symbol,
+)
 from backend.storage.repository import SymbolRepository
 from backend.storage.schemas import SymbolCreate
 
@@ -84,3 +89,66 @@ async def test_add_symbol_rejects_duplicate_from_committed_row(
             if row is not None:
                 await SymbolRepository(cleanup_session).delete(row.id)
             await cleanup_session.close()
+
+
+@pytest.mark.asyncio
+async def test_deactivate_symbol_sets_active_false(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+
+    deactivated = await deactivate_symbol(db_session, "AAPL")
+
+    assert deactivated.symbol == "AAPL"
+    assert deactivated.active is False
+
+
+@pytest.mark.asyncio
+async def test_deactivate_symbol_is_case_insensitive(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+
+    deactivated = await deactivate_symbol(db_session, "aapl")
+
+    assert deactivated.symbol == "AAPL"
+    assert deactivated.active is False
+
+
+@pytest.mark.asyncio
+async def test_deactivate_symbol_raises_not_found_for_unknown_ticker(
+    db_session: AsyncSession,
+) -> None:
+    with pytest.raises(SymbolNotFoundError) as exc_info:
+        await deactivate_symbol(db_session, "UNKNOWN")
+
+    assert exc_info.value.symbol == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_deactivate_symbol_is_idempotent(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+
+    first = await deactivate_symbol(db_session, "AAPL")
+    second = await deactivate_symbol(db_session, "AAPL")
+
+    assert first.active is False
+    assert second.active is False
+
+
+@pytest.mark.asyncio
+async def test_deactivate_symbol_preserves_other_fields(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(
+        db_session,
+        SymbolCreate(symbol="BTC-USD", asset_type="crypto"),
+    )
+
+    deactivated = await deactivate_symbol(db_session, "BTC-USD")
+
+    assert deactivated.symbol == "BTC-USD"
+    assert deactivated.asset_type == "crypto"
+    assert deactivated.active is False

@@ -84,10 +84,13 @@ class SymbolRepository:
         await self._session.refresh(row)
         return row
 
-    async def set_active(self, symbol_id: int, active: bool) -> Symbol | None:
-        row = await self.get_by_id(symbol_id)
-        if row is None:
-            return None
+    async def set_active(self, symbol: Symbol | int, active: bool) -> Symbol | None:
+        if isinstance(symbol, int):
+            row = await self.get_by_id(symbol)
+            if row is None:
+                return None
+        else:
+            row = symbol
         row.active = active
         await self._session.flush()
         await self._session.refresh(row)
