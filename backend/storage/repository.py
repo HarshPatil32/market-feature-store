@@ -56,10 +56,19 @@ class SymbolRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list(self, *, active_only: bool = False) -> Sequence[Symbol]:
+    async def list(
+        self,
+        *,
+        active_only: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> Sequence[Symbol]:
         stmt = select(Symbol).order_by(Symbol.symbol)
         if active_only:
             stmt = stmt.where(Symbol.active.is_(True))
+        stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         return result.scalars().all()
 

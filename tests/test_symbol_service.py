@@ -158,6 +158,19 @@ async def test_list_symbols_includes_coverage_and_freshness_metadata(
 
 
 @pytest.mark.asyncio
+async def test_list_symbols_respects_limit_and_offset(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    await add_symbol(db_session, SymbolCreate(symbol="NVDA"))
+
+    symbols = await list_symbols(db_session, limit=1, offset=1)
+
+    assert [row.symbol for row in symbols] == ["MSFT"]
+
+
+@pytest.mark.asyncio
 async def test_deactivate_symbol_sets_active_false(
     db_session: AsyncSession,
 ) -> None:

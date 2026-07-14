@@ -32,10 +32,14 @@ async def add_symbol(session: AsyncSession, data: SymbolCreate) -> Symbol:
 
 
 async def list_symbols(
-    session: AsyncSession, *, active_only: bool = False
+    session: AsyncSession,
+    *,
+    active_only: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> Sequence[Symbol]:
     repo = SymbolRepository(session)
-    return await repo.list(active_only=active_only)
+    return await repo.list(active_only=active_only, limit=limit, offset=offset)
 
 
 async def deactivate_symbol(session: AsyncSession, symbol: str) -> Symbol:
