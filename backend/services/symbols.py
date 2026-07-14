@@ -1,5 +1,7 @@
 """Symbol registry business logic."""
 
+from collections.abc import Sequence
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +29,13 @@ async def add_symbol(session: AsyncSession, data: SymbolCreate) -> Symbol:
             return await repo.create(symbol=data.symbol, asset_type=data.asset_type)
     except IntegrityError as exc:
         raise DuplicateSymbolError(data.symbol) from exc
+
+
+async def list_symbols(
+    session: AsyncSession, *, active_only: bool = False
+) -> Sequence[Symbol]:
+    repo = SymbolRepository(session)
+    return await repo.list(active_only=active_only)
 
 
 async def deactivate_symbol(session: AsyncSession, symbol: str) -> Symbol:

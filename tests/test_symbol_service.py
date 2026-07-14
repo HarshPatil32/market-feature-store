@@ -1,5 +1,7 @@
 """Tests for symbol registry service logic."""
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -8,6 +10,7 @@ from backend.services.symbols import (
     SymbolNotFoundError,
     add_symbol,
     deactivate_symbol,
+    list_symbols,
 )
 from backend.storage.repository import SymbolRepository
 from backend.storage.schemas import SymbolCreate
@@ -89,6 +92,69 @@ async def test_add_symbol_rejects_duplicate_from_committed_row(
             if row is not None:
                 await SymbolRepository(cleanup_session).delete(row.id)
             await cleanup_session.close()
+
+
+@pytest.mark.asyncio
+async def test_list_symbols_returns_empty_when_no_symbols(
+    db_session: AsyncSession,
+) -> None:
+    symbols = await list_symbols(db_session)
+
+    assert symbols == []
+
+
+@pytest.mark.asyncio
+async def test_list_symbols_returns_all_symbols_by_default(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    await deactivate_symbol(db_session, "MSFT")
+
+    symbols = await list_symbols(db_session)
+
+    assert [row.symbol for row in symbols] == ["AAPL", "MSFT"]
+
+
+@pytest.mark.asyncio
+async def test_list_symbols_active_only_excludes_inactive(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    await deactivate_symbol(db_session, "MSFT")
+
+    symbols = await list_symbols(db_session, active_only=True)
+
+    assert [row.symbol for row in symbols] == ["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_list_symbols_includes_coverage_and_freshness_metadata(
+    db_session: AsyncSession,
+) -> None:
+    created = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+
+    assert created.coverage_start is None
+    assert created.coverage_end is None
+    assert created.last_ingested_at is None
+
+    coverage_start = datetime(2024, 1, 1, tzinfo=UTC)
+    coverage_end = datetime(2024, 6, 1, tzinfo=UTC)
+    last_ingested_at = datetime(2024, 6, 2, tzinfo=UTC)
+    await SymbolRepository(db_session).update_coverage(
+        created.id,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        last_ingested_at=last_ingested_at,
+    )
+
+    symbols = await list_symbols(db_session)
+
+    assert len(symbols) == 1
+    assert symbols[0].coverage_start == coverage_start
+    assert symbols[0].coverage_end == coverage_end
+    assert symbols[0].last_ingested_at == last_ingested_at
 
 
 @pytest.mark.asyncio
