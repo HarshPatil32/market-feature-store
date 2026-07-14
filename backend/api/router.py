@@ -2,14 +2,14 @@
 
 from collections.abc import Sequence
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import get_db_session
-from backend.services.symbols import list_symbols
+from backend.services.symbols import DuplicateSymbolError, add_symbol, list_symbols
 from backend.storage.models import Symbol
-from backend.storage.schemas import SymbolRead
+from backend.storage.schemas import SymbolCreate, SymbolRead
 
 router = APIRouter()
 
@@ -23,6 +23,20 @@ def health() -> dict[str, str]:
 async def health_db(session: AsyncSession = Depends(get_db_session)) -> dict[str, str]:
     await session.execute(text("SELECT 1"))
     return {"status": "ok"}
+
+
+@router.post("/symbols", response_model=SymbolRead, status_code=status.HTTP_201_CREATED)
+async def create_symbol(
+    payload: SymbolCreate,
+    session: AsyncSession = Depends(get_db_session),
+) -> Symbol:
+    try:
+        return await add_symbol(session, payload)
+    except DuplicateSymbolError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/symbols", response_model=list[SymbolRead])
