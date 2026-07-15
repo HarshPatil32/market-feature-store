@@ -7,9 +7,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import get_db_session
-from backend.services.symbols import DuplicateSymbolError, add_symbol, list_symbols
+from backend.services.symbols import (
+    DuplicateSymbolError,
+    SymbolNotFoundError,
+    add_symbol,
+    get_symbol,
+    list_symbols,
+)
 from backend.storage.models import Symbol
-from backend.storage.schemas import SymbolCreate, SymbolRead
+from backend.storage.schemas import SymbolCreate, SymbolRead, Ticker
 
 router = APIRouter()
 
@@ -47,3 +53,17 @@ async def get_symbols(
     session: AsyncSession = Depends(get_db_session),
 ) -> Sequence[Symbol]:
     return await list_symbols(session, active_only=active, limit=limit, offset=offset)
+
+
+@router.get("/symbols/{symbol}", response_model=SymbolRead)
+async def get_symbol_by_ticker(
+    symbol: Ticker,
+    session: AsyncSession = Depends(get_db_session),
+) -> Symbol:
+    try:
+        return await get_symbol(session, symbol)
+    except SymbolNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc

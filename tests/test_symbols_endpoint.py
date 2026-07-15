@@ -163,6 +163,82 @@ async def test_post_symbols_rejects_invalid_payload(
 
 
 @pytest.mark.asyncio
+async def test_get_symbol_by_ticker_returns_200_with_data(
+    client: AsyncClient,
+) -> None:
+    create = await client.post("/symbols", json={"symbol": "AAPL"})
+    assert create.status_code == 201
+
+    response = await client.get("/symbols/AAPL")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "AAPL"
+    assert payload["asset_type"] == "equity"
+    assert payload["active"] is True
+    assert isinstance(payload["id"], int)
+    assert payload["created_at"] is not None
+    assert payload["updated_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_by_ticker_is_case_insensitive(
+    client: AsyncClient,
+) -> None:
+    create = await client.post("/symbols", json={"symbol": "AAPL"})
+    assert create.status_code == 201
+
+    response = await client.get("/symbols/aapl")
+
+    assert response.status_code == 200
+    assert response.json()["symbol"] == "AAPL"
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_by_ticker_unknown_returns_404(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/symbols/UNKNOWN")
+
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path_segment",
+    [
+        "A" * 21,
+        "AA%20PL",
+        "AA%24PL",
+        "AAPL%21",
+        "%20%20%20",
+    ],
+)
+async def test_get_symbol_by_ticker_rejects_invalid_path(
+    client: AsyncClient,
+    path_segment: str,
+) -> None:
+    response = await client.get(f"/symbols/{path_segment}")
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_by_ticker_returns_inactive_symbol(
+    db_session: AsyncSession,
+    client: AsyncClient,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await deactivate_symbol(db_session, "AAPL")
+
+    response = await client.get("/symbols/AAPL")
+
+    assert response.status_code == 200
+    assert response.json()["active"] is False
+
+
+@pytest.mark.asyncio
 async def test_post_symbols_persists_and_is_listable(client: AsyncClient) -> None:
     create = await client.post("/symbols", json={"symbol": "NVDA"})
     assert create.status_code == 201

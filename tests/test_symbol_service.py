@@ -10,6 +10,7 @@ from backend.services.symbols import (
     SymbolNotFoundError,
     add_symbol,
     deactivate_symbol,
+    get_symbol,
     list_symbols,
 )
 from backend.storage.repository import SymbolRepository
@@ -168,6 +169,54 @@ async def test_list_symbols_respects_limit_and_offset(
     symbols = await list_symbols(db_session, limit=1, offset=1)
 
     assert [row.symbol for row in symbols] == ["MSFT"]
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_returns_existing_symbol(
+    db_session: AsyncSession,
+) -> None:
+    created = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+
+    fetched = await get_symbol(db_session, "AAPL")
+
+    assert fetched.id == created.id
+    assert fetched.symbol == "AAPL"
+    assert fetched.asset_type == "equity"
+    assert fetched.active is True
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_is_case_insensitive(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+
+    fetched = await get_symbol(db_session, "aapl")
+
+    assert fetched.symbol == "AAPL"
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_raises_not_found_for_unknown_ticker(
+    db_session: AsyncSession,
+) -> None:
+    with pytest.raises(SymbolNotFoundError) as exc_info:
+        await get_symbol(db_session, "UNKNOWN")
+
+    assert exc_info.value.symbol == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_returns_inactive_symbol(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await deactivate_symbol(db_session, "AAPL")
+
+    fetched = await get_symbol(db_session, "AAPL")
+
+    assert fetched.symbol == "AAPL"
+    assert fetched.active is False
 
 
 @pytest.mark.asyncio

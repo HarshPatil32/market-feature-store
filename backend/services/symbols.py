@@ -42,6 +42,15 @@ async def list_symbols(
     return await repo.list(active_only=active_only, limit=limit, offset=offset)
 
 
+async def get_symbol(session: AsyncSession, symbol: str) -> Symbol:
+    ticker = symbol.strip().upper()
+    repo = SymbolRepository(session)
+    row = await repo.get_by_symbol(ticker)
+    if row is None:
+        raise SymbolNotFoundError(ticker)
+    return row
+
+
 async def deactivate_symbol(session: AsyncSession, symbol: str) -> Symbol:
     ticker = symbol.strip().upper()
     repo = SymbolRepository(session)
