@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db import get_db_session
+from backend.services.ingestion_runs import trigger_backfill, trigger_incremental
 from backend.services.symbols import (
     DuplicateSymbolError,
     SymbolNotFoundError,
@@ -14,8 +15,8 @@ from backend.services.symbols import (
     get_symbol,
     list_symbols,
 )
-from backend.storage.models import Symbol
-from backend.storage.schemas import SymbolCreate, SymbolRead, Ticker
+from backend.storage.models import IngestionRun, Symbol
+from backend.storage.schemas import IngestionRunRead, SymbolCreate, SymbolRead, Ticker
 
 router = APIRouter()
 
@@ -62,6 +63,42 @@ async def get_symbol_by_ticker(
 ) -> Symbol:
     try:
         return await get_symbol(session, symbol)
+    except SymbolNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/symbols/{symbol}/backfill",
+    response_model=IngestionRunRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def trigger_symbol_backfill(
+    symbol: Ticker,
+    session: AsyncSession = Depends(get_db_session),
+) -> IngestionRun:
+    try:
+        return await trigger_backfill(session, symbol)
+    except SymbolNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/symbols/{symbol}/incremental",
+    response_model=IngestionRunRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def trigger_symbol_incremental(
+    symbol: Ticker,
+    session: AsyncSession = Depends(get_db_session),
+) -> IngestionRun:
+    try:
+        return await trigger_incremental(session, symbol)
     except SymbolNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

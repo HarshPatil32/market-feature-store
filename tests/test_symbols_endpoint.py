@@ -12,6 +12,14 @@ from backend.main import app
 from backend.services.symbols import add_symbol, deactivate_symbol
 from backend.storage.schemas import SymbolCreate
 
+INVALID_SYMBOL_PATH_SEGMENTS = [
+    "A" * 21,
+    "AA%20PL",
+    "AA%24PL",
+    "AAPL%21",
+    "%20%20%20",
+]
+
 
 @pytest_asyncio.fixture
 async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
@@ -205,16 +213,7 @@ async def test_get_symbol_by_ticker_unknown_returns_404(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "path_segment",
-    [
-        "A" * 21,
-        "AA%20PL",
-        "AA%24PL",
-        "AAPL%21",
-        "%20%20%20",
-    ],
-)
+@pytest.mark.parametrize("path_segment", INVALID_SYMBOL_PATH_SEGMENTS)
 async def test_get_symbol_by_ticker_rejects_invalid_path(
     client: AsyncClient,
     path_segment: str,
@@ -247,3 +246,102 @@ async def test_post_symbols_persists_and_is_listable(client: AsyncClient) -> Non
 
     assert response.status_code == 200
     assert [row["symbol"] for row in response.json()] == ["NVDA"]
+
+
+@pytest.mark.asyncio
+async def test_post_symbol_backfill_returns_201_with_run_id(
+    client: AsyncClient,
+) -> None:
+    create = await client.post("/symbols", json={"symbol": "AAPL"})
+    assert create.status_code == 201
+    symbol_id = create.json()["id"]
+
+    response = await client.post("/symbols/AAPL/backfill")
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert isinstance(payload["id"], int)
+    assert payload["run_type"] == "backfill"
+    assert payload["status"] == "pending"
+    assert payload["symbol_id"] == symbol_id
+    assert payload["fetched"] == 0
+    assert payload["inserted"] == 0
+    assert payload["failed"] == 0
+    assert payload["error_message"] is None
+    assert payload["created_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_post_symbol_incremental_returns_201_with_run_id(
+    client: AsyncClient,
+) -> None:
+    create = await client.post("/symbols", json={"symbol": "MSFT"})
+    assert create.status_code == 201
+    symbol_id = create.json()["id"]
+
+    response = await client.post("/symbols/MSFT/incremental")
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert isinstance(payload["id"], int)
+    assert payload["run_type"] == "incremental"
+    assert payload["status"] == "pending"
+    assert payload["symbol_id"] == symbol_id
+    assert payload["created_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_post_symbol_backfill_is_case_insensitive(
+    client: AsyncClient,
+) -> None:
+    create = await client.post("/symbols", json={"symbol": "AAPL"})
+    assert create.status_code == 201
+
+    response = await client.post("/symbols/aapl/backfill")
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["run_type"] == "backfill"
+    assert payload["symbol_id"] == create.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_post_symbol_backfill_unknown_returns_404(
+    client: AsyncClient,
+) -> None:
+    response = await client.post("/symbols/UNKNOWN/backfill")
+
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_post_symbol_incremental_unknown_returns_404(
+    client: AsyncClient,
+) -> None:
+    response = await client.post("/symbols/UNKNOWN/incremental")
+
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_segment", INVALID_SYMBOL_PATH_SEGMENTS)
+async def test_post_symbol_backfill_rejects_invalid_path(
+    client: AsyncClient,
+    path_segment: str,
+) -> None:
+    response = await client.post(f"/symbols/{path_segment}/backfill")
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_segment", INVALID_SYMBOL_PATH_SEGMENTS)
+async def test_post_symbol_incremental_rejects_invalid_path(
+    client: AsyncClient,
+    path_segment: str,
+) -> None:
+    response = await client.post(f"/symbols/{path_segment}/incremental")
+
+    assert response.status_code == 422

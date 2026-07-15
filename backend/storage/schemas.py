@@ -5,6 +5,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
 
+from backend.storage.models import RunStatus
+
 
 def _normalize_ticker(value: object) -> str:
     if not isinstance(value, str):
@@ -45,3 +47,19 @@ class SymbolRead(BaseModel):
     last_ingested_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class IngestionRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    run_type: str
+    status: RunStatus
+    symbol_id: int | None
+    fetched: int
+    inserted: int
+    failed: int
+    error_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
