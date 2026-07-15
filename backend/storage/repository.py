@@ -56,10 +56,19 @@ class SymbolRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list(self, *, active_only: bool = False) -> Sequence[Symbol]:
+    async def list(
+        self,
+        *,
+        active_only: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> Sequence[Symbol]:
         stmt = select(Symbol).order_by(Symbol.symbol)
         if active_only:
             stmt = stmt.where(Symbol.active.is_(True))
+        stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         return result.scalars().all()
 
@@ -84,10 +93,13 @@ class SymbolRepository:
         await self._session.refresh(row)
         return row
 
-    async def set_active(self, symbol_id: int, active: bool) -> Symbol | None:
-        row = await self.get_by_id(symbol_id)
-        if row is None:
-            return None
+    async def set_active(self, symbol: Symbol | int, active: bool) -> Symbol | None:
+        if isinstance(symbol, int):
+            row = await self.get_by_id(symbol)
+            if row is None:
+                return None
+        else:
+            row = symbol
         row.active = active
         await self._session.flush()
         await self._session.refresh(row)

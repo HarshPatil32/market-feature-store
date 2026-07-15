@@ -64,6 +64,53 @@ async def test_list_active_only(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_respects_limit(db_session: AsyncSession) -> None:
+    repo = SymbolRepository(db_session)
+    await repo.create(symbol="AAPL")
+    await repo.create(symbol="MSFT")
+    await repo.create(symbol="NVDA")
+
+    symbols = await repo.list(limit=2)
+
+    assert [row.symbol for row in symbols] == ["AAPL", "MSFT"]
+
+
+@pytest.mark.asyncio
+async def test_list_respects_offset(db_session: AsyncSession) -> None:
+    repo = SymbolRepository(db_session)
+    await repo.create(symbol="AAPL")
+    await repo.create(symbol="MSFT")
+    await repo.create(symbol="NVDA")
+
+    symbols = await repo.list(offset=1)
+
+    assert [row.symbol for row in symbols] == ["MSFT", "NVDA"]
+
+
+@pytest.mark.asyncio
+async def test_list_limit_and_offset_combined(db_session: AsyncSession) -> None:
+    repo = SymbolRepository(db_session)
+    await repo.create(symbol="AAPL")
+    await repo.create(symbol="MSFT")
+    await repo.create(symbol="NVDA")
+
+    symbols = await repo.list(limit=1, offset=1)
+
+    assert [row.symbol for row in symbols] == ["MSFT"]
+
+
+@pytest.mark.asyncio
+async def test_list_limit_none_returns_all(db_session: AsyncSession) -> None:
+    repo = SymbolRepository(db_session)
+    await repo.create(symbol="AAPL")
+    await repo.create(symbol="MSFT")
+
+    symbols = await repo.list(limit=None)
+
+    assert [row.symbol for row in symbols] == ["AAPL", "MSFT"]
+
+
+@pytest.mark.asyncio
 async def test_update_coverage_partial_update_preserves_other_fields(
     db_session: AsyncSession,
 ) -> None:
