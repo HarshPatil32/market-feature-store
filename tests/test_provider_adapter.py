@@ -5,9 +5,11 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
+from backend.config import Settings
 from backend.providers.base import MarketDataProvider, ProviderError
-from backend.providers.provider_adapter import AlpacaProvider
+from backend.providers.provider_adapter import AlpacaProvider, get_market_data_provider
 
 API_KEY = "test-key-id"
 API_SECRET = "test-secret"
@@ -269,6 +271,50 @@ async def test_pagination_exceeds_max_pages_raises() -> None:
 
     with pytest.raises(ProviderError, match="exceeded 2 pages"):
         await provider.fetch_historical_bars("AAPL", "1d", start, end)
+
+
+def test_get_market_data_provider_uses_settings_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "backend.providers.provider_adapter.get_settings",
+        lambda: Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            provider_api_key="env-key-id",
+            provider_api_secret="env-secret",
+        ),
+    )
+
+    provider = get_market_data_provider()
+
+    assert provider._api_key == "env-key-id"
+    assert provider._api_secret == "env-secret"
+
+
+def test_get_market_data_provider_raises_when_api_key_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PROVIDER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "backend.providers.provider_adapter.get_settings",
+        lambda: Settings(_env_file=None),
+    )
+
+    with pytest.raises(ValidationError):
+        get_market_data_provider()
+
+
+def test_get_market_data_provider_raises_when_api_secret_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PROVIDER_API_SECRET", raising=False)
+    monkeypatch.setattr(
+        "backend.providers.provider_adapter.get_settings",
+        lambda: Settings(_env_file=None),
+    )
+
+    with pytest.raises(ValidationError):
+        get_market_data_provider()
 
 
 async def test_non_dict_bar_entry_raises_provider_error() -> None:

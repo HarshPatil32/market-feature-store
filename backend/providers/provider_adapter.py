@@ -11,6 +11,7 @@ import httpx
 from pydantic import AwareDatetime, ValidationError
 
 from backend.bar import Bar
+from backend.config import get_settings
 from backend.providers.base import MarketDataProvider, ProviderError
 from backend.storage.schemas import Ticker
 
@@ -256,3 +257,12 @@ class AlpacaProvider(MarketDataProvider):
             volume=Decimal(str(raw["v"])),
             source=SOURCE,
         )
+
+
+def get_market_data_provider() -> AlpacaProvider:
+    """Build an Alpaca provider using API credentials from settings/env."""
+    settings = get_settings()
+    return AlpacaProvider(
+        api_key=settings.provider_api_key.get_secret_value(),
+        api_secret=settings.provider_api_secret.get_secret_value(),
+    )
