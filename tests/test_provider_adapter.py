@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -9,7 +10,14 @@ from pydantic import ValidationError
 
 from backend.config import Settings
 from backend.providers.base import MarketDataProvider, ProviderError
-from backend.providers.provider_adapter import AlpacaProvider, get_market_data_provider
+from backend.providers.provider_adapter import (
+    MAX_RETRY_ATTEMPTS,
+    RETRY_MAX_DELAY_SECONDS,
+    AlpacaProvider,
+    _compute_delay,
+    _parse_retry_after,
+    get_market_data_provider,
+)
 
 API_KEY = "test-key-id"
 API_SECRET = "test-secret"
@@ -45,6 +53,16 @@ def _provider(transport: httpx.BaseTransport) -> AlpacaProvider:
         base_url="https://data.alpaca.markets",
     )
     return AlpacaProvider(API_KEY, API_SECRET, client=client)
+
+
+@pytest.fixture
+def mock_sleep(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        "backend.providers.provider_adapter.asyncio.sleep",
+        sleep,
+    )
+    return sleep
 
 
 async def test_fetch_historical_bars_returns_standard_bars() -> None:
@@ -169,8 +187,14 @@ async def test_fetch_latest_bars_rejects_invalid_limit() -> None:
         await provider.fetch_latest_bars("AAPL", "1d", limit=0)
 
 
-async def test_http_error_raises_provider_error() -> None:
+async def test_http_error_raises_provider_error(
+    mock_sleep: AsyncMock,
+) -> None:
+    calls = 0
+
     def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         return httpx.Response(500, json={"message": "internal error"})
 
     provider = _provider(httpx.MockTransport(handler))
@@ -180,15 +204,27 @@ async def test_http_error_raises_provider_error() -> None:
     with pytest.raises(ProviderError, match="HTTP 500"):
         await provider.fetch_historical_bars("AAPL", "1d", start, end)
 
+    assert calls == MAX_RETRY_ATTEMPTS
+    assert mock_sleep.await_count == MAX_RETRY_ATTEMPTS - 1
 
-async def test_unauthorized_raises_provider_error() -> None:
+
+async def test_unauthorized_raises_provider_error(
+    mock_sleep: AsyncMock,
+) -> None:
+    calls = 0
+
     def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         return httpx.Response(401, json={"message": "invalid credentials"})
 
     provider = _provider(httpx.MockTransport(handler))
 
     with pytest.raises(ProviderError, match="HTTP 401"):
         await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert calls == 1
+    mock_sleep.assert_not_awaited()
 
 
 async def test_malformed_payload_raises_provider_error() -> None:
@@ -219,14 +255,23 @@ async def test_unknown_symbol_returns_empty_list() -> None:
     assert bars == []
 
 
-async def test_connection_error_raises_provider_error() -> None:
+async def test_connection_error_raises_provider_error(
+    mock_sleep: AsyncMock,
+) -> None:
+    calls = 0
+
     def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         raise httpx.ConnectError("connection refused")
 
     provider = _provider(httpx.MockTransport(handler))
 
     with pytest.raises(ProviderError, match="Alpaca request failed"):
         await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert calls == MAX_RETRY_ATTEMPTS
+    assert mock_sleep.await_count == MAX_RETRY_ATTEMPTS - 1
 
 
 async def test_async_context_manager_closes_lazy_client(
@@ -330,3 +375,198 @@ async def test_non_dict_bar_entry_raises_provider_error() -> None:
 
     with pytest.raises(ProviderError, match="must be an object"):
         await provider.fetch_historical_bars("AAPL", "1d", start, end)
+
+
+async def test_429_retries_then_succeeds(mock_sleep: AsyncMock) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(429, json={"message": "rate limited"})
+        return httpx.Response(200, json=_sample_bar_payload())
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    bars = await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert calls == 3
+    assert len(bars) == 1
+    assert mock_sleep.await_count == 2
+
+
+async def test_429_respects_retry_after_header(mock_sleep: AsyncMock) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                429,
+                json={"message": "rate limited"},
+                headers={"Retry-After": "2"},
+            )
+        return httpx.Response(200, json=_sample_bar_payload())
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    bars = await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert len(bars) == 1
+    mock_sleep.assert_awaited_once_with(2.0)
+
+
+async def test_429_caps_retry_after_header(mock_sleep: AsyncMock) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                429,
+                json={"message": "rate limited"},
+                headers={"Retry-After": "999"},
+            )
+        return httpx.Response(200, json=_sample_bar_payload())
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    await provider.fetch_latest_bars("AAPL", "1d")
+
+    mock_sleep.assert_awaited_once_with(RETRY_MAX_DELAY_SECONDS)
+
+
+async def test_5xx_retries_then_succeeds(mock_sleep: AsyncMock) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(503, json={"message": "unavailable"})
+        return httpx.Response(200, json=_sample_bar_payload())
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    bars = await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert len(bars) == 1
+    assert calls == 2
+    mock_sleep.assert_awaited_once()
+
+
+async def test_timeout_retries_then_succeeds(mock_sleep: AsyncMock) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("read timed out")
+        return httpx.Response(200, json=_sample_bar_payload())
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    bars = await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert len(bars) == 1
+    assert calls == 2
+    mock_sleep.assert_awaited_once()
+
+
+async def test_connect_timeout_retries_then_succeeds(mock_sleep: AsyncMock) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectTimeout("connect timed out")
+        return httpx.Response(200, json=_sample_bar_payload())
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    bars = await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert len(bars) == 1
+    assert calls == 2
+    mock_sleep.assert_awaited_once()
+
+
+async def test_429_with_invalid_retry_after_uses_exponential_backoff(
+    mock_sleep: AsyncMock,
+) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                429,
+                json={"message": "rate limited"},
+                headers={"Retry-After": "bad"},
+            )
+        return httpx.Response(200, json=_sample_bar_payload())
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    bars = await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert len(bars) == 1
+    mock_sleep.assert_awaited_once()
+    await_args = mock_sleep.await_args
+    assert await_args is not None
+    delay = await_args.args[0]
+    assert delay != 2.0
+    assert delay <= RETRY_MAX_DELAY_SECONDS * 1.1
+
+
+async def test_non_retryable_4xx_fails_immediately(mock_sleep: AsyncMock) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(404, json={"message": "not found"})
+
+    provider = _provider(httpx.MockTransport(handler))
+
+    with pytest.raises(ProviderError, match="HTTP 404"):
+        await provider.fetch_latest_bars("AAPL", "1d")
+
+    assert calls == 1
+    mock_sleep.assert_not_awaited()
+
+
+def test_compute_delay_uses_retry_after() -> None:
+    assert _compute_delay(0, 2.0) == 2.0
+
+
+def test_compute_delay_caps_exponential_backoff() -> None:
+    delay = _compute_delay(10, None)
+    assert delay <= RETRY_MAX_DELAY_SECONDS * 1.1
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected"),
+    [
+        ("2", 2.0),
+        ("999", RETRY_MAX_DELAY_SECONDS),
+        ("bad", None),
+        ("-1", None),
+    ],
+)
+def test_parse_retry_after(retry_after: str, expected: float | None) -> None:
+    response = httpx.Response(429, headers={"Retry-After": retry_after})
+
+    assert _parse_retry_after(response) == expected
+
+
+def test_parse_retry_after_missing_header() -> None:
+    response = httpx.Response(429)
+
+    assert _parse_retry_after(response) is None

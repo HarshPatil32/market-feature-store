@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import random
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -19,6 +21,10 @@ DATA_BASE_URL = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
 SOURCE = "alpaca"
 DEFAULT_MAX_PAGES = 1000
+MAX_RETRY_ATTEMPTS = 4
+RETRY_BASE_DELAY_SECONDS = 0.5
+RETRY_MAX_DELAY_SECONDS = 8.0
+REQUEST_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
 
 TIMEFRAME_TO_ALPACA: dict[str, str] = {
     "1m": "1Min",
@@ -52,6 +58,33 @@ def _to_alpaca_timeframe(timeframe: str) -> str:
 
 def _format_datetime(value: AwareDatetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code <= 599
+
+
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    header = response.headers.get("Retry-After")
+    if header is None:
+        return None
+    try:
+        seconds = float(header.strip())
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, RETRY_MAX_DELAY_SECONDS)
+
+
+def _compute_delay(attempt: int, retry_after: float | None) -> float:
+    if retry_after is not None:
+        return retry_after
+    delay: float = min(
+        RETRY_BASE_DELAY_SECONDS * (2**attempt),
+        RETRY_MAX_DELAY_SECONDS,
+    )
+    return delay + float(random.uniform(0, 0.1 * delay))
 
 
 class AlpacaProvider(MarketDataProvider):
@@ -145,39 +178,63 @@ class AlpacaProvider(MarketDataProvider):
 
     async def _request_bars(self, params: Mapping[str, str | int]) -> dict[str, Any]:
         client = await self._get_client()
-        try:
-            response = await client.get(
-                BARS_PATH,
-                params=params,
-                headers={
-                    "APCA-API-KEY-ID": self._api_key,
-                    "APCA-API-SECRET-KEY": self._api_secret,
-                },
-            )
-        except httpx.HTTPError as exc:
-            raise ProviderError("Alpaca request failed") from exc
 
-        if response.status_code >= 400:
-            message = self._error_message(response)
-            raise ProviderError(
-                f"Alpaca returned HTTP {response.status_code}: {message}"
-            )
+        for attempt in range(MAX_RETRY_ATTEMPTS):
+            try:
+                response = await client.get(
+                    BARS_PATH,
+                    params=params,
+                    headers={
+                        "APCA-API-KEY-ID": self._api_key,
+                        "APCA-API-SECRET-KEY": self._api_secret,
+                    },
+                )
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                if attempt + 1 < MAX_RETRY_ATTEMPTS:
+                    await asyncio.sleep(_compute_delay(attempt, None))
+                    continue
+                raise ProviderError("Alpaca request failed") from exc
+            except httpx.HTTPError as exc:
+                raise ProviderError("Alpaca request failed") from exc
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ProviderError("Alpaca returned invalid JSON") from exc
+            if _is_retryable_status(response.status_code):
+                if attempt + 1 < MAX_RETRY_ATTEMPTS:
+                    retry_after = (
+                        _parse_retry_after(response)
+                        if response.status_code == 429
+                        else None
+                    )
+                    await asyncio.sleep(_compute_delay(attempt, retry_after))
+                    continue
 
-        if not isinstance(payload, dict):
-            raise ProviderError("Alpaca response must be a JSON object")
+                message = self._error_message(response)
+                raise ProviderError(
+                    f"Alpaca returned HTTP {response.status_code}: {message}"
+                )
 
-        return payload
+            if response.status_code >= 400:
+                message = self._error_message(response)
+                raise ProviderError(
+                    f"Alpaca returned HTTP {response.status_code}: {message}"
+                )
+
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ProviderError("Alpaca returned invalid JSON") from exc
+
+            if not isinstance(payload, dict):
+                raise ProviderError("Alpaca response must be a JSON object")
+
+            return payload
+
+        raise AssertionError("_request_bars retry loop exhausted without result")
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
-                timeout=httpx.Timeout(30.0),
+                timeout=REQUEST_TIMEOUT,
             )
         return self._client
 
