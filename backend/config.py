@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     database_url: PostgresDsn
     provider_api_key: SecretStr
+    provider_api_secret: SecretStr
     environment: Literal["development", "staging", "production"] = "development"
     log_level: LogLevel = "INFO"
 

@@ -32,8 +32,10 @@ def db_url(pg_container: PostgresContainer) -> str:
 def override_settings(db_url: str) -> Generator[None, None, None]:
     original_db = os.environ.get("DATABASE_URL")
     original_key = os.environ.get("PROVIDER_API_KEY")
+    original_secret = os.environ.get("PROVIDER_API_SECRET")
     os.environ["DATABASE_URL"] = db_url
     os.environ["PROVIDER_API_KEY"] = "test-key"
+    os.environ["PROVIDER_API_SECRET"] = "test-secret"
     get_settings.cache_clear()
     clear_db_cache()
     yield
@@ -45,6 +47,10 @@ def override_settings(db_url: str) -> Generator[None, None, None]:
         os.environ.pop("PROVIDER_API_KEY", None)
     else:
         os.environ["PROVIDER_API_KEY"] = original_key
+    if original_secret is None:
+        os.environ.pop("PROVIDER_API_SECRET", None)
+    else:
+        os.environ["PROVIDER_API_SECRET"] = original_secret
     get_settings.cache_clear()
     clear_db_cache()
 

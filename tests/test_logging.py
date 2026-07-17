@@ -37,6 +37,7 @@ def _configure(
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", VALID_DB_URL)
     monkeypatch.setenv("PROVIDER_API_KEY", "test-key")
+    monkeypatch.setenv("PROVIDER_API_SECRET", "test-secret")
     monkeypatch.setenv("ENVIRONMENT", environment)
     monkeypatch.setenv("LOG_LEVEL", log_level)
     configure_logging()
