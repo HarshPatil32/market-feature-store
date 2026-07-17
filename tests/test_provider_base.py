@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError
 
 from backend.providers.base import Bar, MarketDataProvider
 from backend.storage.schemas import Ticker
@@ -28,6 +27,7 @@ class _FakeProvider(MarketDataProvider):
                 low=Decimal("99"),
                 close=Decimal("103"),
                 volume=Decimal("1000"),
+                source="alpaca",
             )
         ]
 
@@ -72,34 +72,5 @@ async def test_fake_provider_satisfies_interface() -> None:
     assert isinstance(provider, MarketDataProvider)
     assert len(historical) == 1
     assert historical[0].symbol == "AAPL"
+    assert historical[0].source == "alpaca"
     assert latest == []
-
-
-def test_bar_rejects_naive_datetime() -> None:
-    with pytest.raises(ValidationError):
-        Bar(
-            symbol="AAPL",
-            ts=datetime(2024, 1, 1),
-            timeframe="1d",
-            open=Decimal("100"),
-            high=Decimal("105"),
-            low=Decimal("99"),
-            close=Decimal("103"),
-            volume=Decimal("1000"),
-        )
-
-
-def test_bar_is_immutable() -> None:
-    bar = Bar(
-        symbol="AAPL",
-        ts=datetime(2024, 1, 1, tzinfo=UTC),
-        timeframe="1d",
-        open=Decimal("100"),
-        high=Decimal("105"),
-        low=Decimal("99"),
-        close=Decimal("103"),
-        volume=Decimal("1000"),
-    )
-
-    with pytest.raises(ValidationError):
-        bar.close = Decimal("110")  # type: ignore[misc]

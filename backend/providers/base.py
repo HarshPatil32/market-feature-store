@@ -2,30 +2,15 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from decimal import Decimal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime
 
+from backend.bar import Bar as Bar
 from backend.storage.schemas import Ticker
 
 
 class ProviderError(Exception):
     """Base exception for provider adapter failures."""
-
-
-class Bar(BaseModel):
-    """Minimal OHLCV bar returned by a provider."""
-
-    model_config = ConfigDict(frozen=True)
-
-    symbol: Ticker
-    ts: AwareDatetime
-    timeframe: str
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
 
 
 class MarketDataProvider(ABC):
