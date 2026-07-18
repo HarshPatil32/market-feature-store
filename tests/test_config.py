@@ -88,6 +88,7 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.environment == "development"
     assert settings.log_level == "INFO"
+    assert settings.provider_name == "alpaca"
 
 
 def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,6 +114,16 @@ def test_invalid_log_level_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROVIDER_API_KEY", "test-key")
     monkeypatch.setenv("PROVIDER_API_SECRET", "test-secret")
     monkeypatch.setenv("LOG_LEVEL", "VERBOSE")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_blank_provider_name_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", VALID_DB_URL)
+    monkeypatch.setenv("PROVIDER_API_KEY", "test-key")
+    monkeypatch.setenv("PROVIDER_API_SECRET", "test-secret")
+    monkeypatch.setenv("PROVIDER_NAME", "   ")
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
