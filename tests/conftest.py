@@ -13,6 +13,7 @@ from testcontainers.postgres import PostgresContainer
 
 from backend.config import get_settings
 from backend.db import clear_db_cache, get_engine
+from backend.providers.fake import FakeProvider
 
 PG_IMAGE = "postgres:16-alpine"
 
@@ -68,6 +69,13 @@ async def engine(_migrated: None) -> AsyncGenerator[AsyncEngine, None]:
     eng = get_engine()
     yield eng
     await eng.dispose()
+
+
+# Default fake provider for tests that do not need a fixed clock.
+# test_provider_fake.py overrides this fixture with a fixed `now`.
+@pytest.fixture
+def fake_provider() -> FakeProvider:
+    return FakeProvider()
 
 
 @pytest_asyncio.fixture
