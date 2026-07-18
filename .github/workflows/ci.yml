@@ -16,6 +16,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://postgres:ci@localhost:5432/ci
       PROVIDER_API_KEY: ci-placeholder
+      PROVIDER_API_SECRET: ci-placeholder
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

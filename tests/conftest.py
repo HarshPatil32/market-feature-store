@@ -13,6 +13,7 @@ from testcontainers.postgres import PostgresContainer
 
 from backend.config import get_settings
 from backend.db import clear_db_cache, get_engine
+from backend.providers.fake import FakeProvider
 
 PG_IMAGE = "postgres:16-alpine"
 
@@ -32,8 +33,10 @@ def db_url(pg_container: PostgresContainer) -> str:
 def override_settings(db_url: str) -> Generator[None, None, None]:
     original_db = os.environ.get("DATABASE_URL")
     original_key = os.environ.get("PROVIDER_API_KEY")
+    original_secret = os.environ.get("PROVIDER_API_SECRET")
     os.environ["DATABASE_URL"] = db_url
     os.environ["PROVIDER_API_KEY"] = "test-key"
+    os.environ["PROVIDER_API_SECRET"] = "test-secret"
     get_settings.cache_clear()
     clear_db_cache()
     yield
@@ -45,6 +48,10 @@ def override_settings(db_url: str) -> Generator[None, None, None]:
         os.environ.pop("PROVIDER_API_KEY", None)
     else:
         os.environ["PROVIDER_API_KEY"] = original_key
+    if original_secret is None:
+        os.environ.pop("PROVIDER_API_SECRET", None)
+    else:
+        os.environ["PROVIDER_API_SECRET"] = original_secret
     get_settings.cache_clear()
     clear_db_cache()
 
@@ -62,6 +69,13 @@ async def engine(_migrated: None) -> AsyncGenerator[AsyncEngine, None]:
     eng = get_engine()
     yield eng
     await eng.dispose()
+
+
+# Default fake provider for tests that do not need a fixed clock.
+# test_provider_fake.py overrides this fixture with a fixed `now`.
+@pytest.fixture
+def fake_provider() -> FakeProvider:
+    return FakeProvider()
 
 
 @pytest_asyncio.fixture
