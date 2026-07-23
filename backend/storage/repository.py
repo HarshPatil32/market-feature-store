@@ -178,18 +178,28 @@ class RawMarketDataRepository:
     async def create(
         self,
         *,
-        response_payload: dict[str, Any],
+        response_payload: dict[str, Any] | None,
         run_id: int | None = None,
         symbol_id: int | None = None,
         source: str | None = None,
         request_params: dict[str, Any] | None = None,
+        payload_object_key: str | None = None,
+        payload_size_bytes: int | None = None,
     ) -> RawMarketData:
+        has_inline = response_payload is not None
+        has_external = payload_object_key is not None
+        if has_inline == has_external:
+            raise ValueError(
+                "exactly one of response_payload or payload_object_key must be set"
+            )
         row = RawMarketData(
             response_payload=response_payload,
             run_id=run_id,
             symbol_id=symbol_id,
             source=source,
             request_params=request_params,
+            payload_object_key=payload_object_key,
+            payload_size_bytes=payload_size_bytes,
         )
         self._session.add(row)
         await self._session.flush()
@@ -198,6 +208,28 @@ class RawMarketDataRepository:
 
     async def get_by_id(self, raw_market_data_id: int) -> RawMarketData | None:
         return await self._session.get(RawMarketData, raw_market_data_id)
+
+    async def list_by_symbol(
+        self,
+        symbol_id: int,
+        *,
+        run_id: int | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> Sequence[RawMarketData]:
+        stmt = (
+            select(RawMarketData)
+            .where(RawMarketData.symbol_id == symbol_id)
+            .order_by(RawMarketData.created_at, RawMarketData.id)
+        )
+        if run_id is not None:
+            stmt = stmt.where(RawMarketData.run_id == run_id)
+        if start is not None:
+            stmt = stmt.where(RawMarketData.created_at >= start)
+        if end is not None:
+            stmt = stmt.where(RawMarketData.created_at <= end)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
 
 
 class MarketBarRepository:

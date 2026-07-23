@@ -1,5 +1,7 @@
 """Tests for RawMarketDataRepository CRUD operations."""
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -85,7 +87,7 @@ async def test_create_with_invalid_symbol_id_raises_integrity_error(
 
 
 @pytest.mark.asyncio
-async def test_null_response_payload_rejected_by_not_null_constraint(
+async def test_null_response_payload_without_object_key_rejected(
     db_session: AsyncSession,
 ) -> None:
     with pytest.raises(IntegrityError):
@@ -94,6 +96,47 @@ async def test_null_response_payload_rejected_by_not_null_constraint(
             {"payload": None},
         )
         await db_session.flush()
+
+
+@pytest.mark.asyncio
+async def test_create_with_object_key_and_no_inline_payload(
+    db_session: AsyncSession,
+) -> None:
+    repo = RawMarketDataRepository(db_session)
+    created = await repo.create(
+        response_payload=None,
+        payload_object_key="raw/1/abc.json",
+        payload_size_bytes=1024,
+    )
+    fetched = await repo.get_by_id(created.id)
+
+    assert fetched is not None
+    assert fetched.response_payload is None
+    assert fetched.payload_object_key == "raw/1/abc.json"
+    assert fetched.payload_size_bytes == 1024
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_both_payload_locations(
+    db_session: AsyncSession,
+) -> None:
+    repo = RawMarketDataRepository(db_session)
+
+    with pytest.raises(ValueError, match="exactly one of"):
+        await repo.create(
+            response_payload={"bars": []},
+            payload_object_key="raw/1/abc.json",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_neither_payload_location(
+    db_session: AsyncSession,
+) -> None:
+    repo = RawMarketDataRepository(db_session)
+
+    with pytest.raises(ValueError, match="exactly one of"):
+        await repo.create(response_payload=None)
 
 
 @pytest.mark.asyncio
@@ -107,6 +150,55 @@ async def test_get_by_id(db_session: AsyncSession) -> None:
     assert fetched is not None
     assert fetched.id == created.id
     assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_list_by_symbol_filters_and_orders(db_session: AsyncSession) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    run_repo = IngestionRunRepository(db_session)
+    raw_repo = RawMarketDataRepository(db_session)
+
+    symbol_a = await symbol_repo.create(symbol="AAPL")
+    symbol_b = await symbol_repo.create(symbol="MSFT")
+    run_a = await run_repo.create(run_type="backfill", symbol_id=symbol_a.id)
+    run_b = await run_repo.create(run_type="backfill", symbol_id=symbol_a.id)
+
+    row_a = await raw_repo.create(
+        run_id=run_a.id,
+        symbol_id=symbol_a.id,
+        response_payload={"label": "a"},
+    )
+    row_b = await raw_repo.create(
+        run_id=run_b.id,
+        symbol_id=symbol_a.id,
+        response_payload={"label": "b"},
+    )
+    await raw_repo.create(
+        symbol_id=symbol_b.id,
+        response_payload={"label": "other"},
+    )
+
+    await db_session.execute(
+        text("UPDATE raw_market_data SET created_at = :ts WHERE id = :id"),
+        {"ts": datetime(2024, 1, 1, tzinfo=UTC), "id": row_a.id},
+    )
+    await db_session.execute(
+        text("UPDATE raw_market_data SET created_at = :ts WHERE id = :id"),
+        {"ts": datetime(2024, 6, 1, tzinfo=UTC), "id": row_b.id},
+    )
+    await db_session.flush()
+
+    by_symbol = await raw_repo.list_by_symbol(symbol_a.id)
+    by_run = await raw_repo.list_by_symbol(symbol_a.id, run_id=run_a.id)
+    by_range = await raw_repo.list_by_symbol(
+        symbol_a.id,
+        start=datetime(2024, 2, 1, tzinfo=UTC),
+        end=datetime(2024, 12, 31, tzinfo=UTC),
+    )
+
+    assert [row.id for row in by_symbol] == [row_a.id, row_b.id]
+    assert [row.id for row in by_run] == [row_a.id]
+    assert [row.id for row in by_range] == [row_b.id]
 
 
 @pytest.mark.asyncio
