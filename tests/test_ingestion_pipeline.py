@@ -123,6 +123,55 @@ async def test_ingest_raw_data_normalization_failure_does_not_poison_session(
 
 
 @pytest.mark.asyncio
+async def test_ingest_raw_data_normalization_uses_in_memory_payload_when_s3_backed(
+    db_session: AsyncSession,
+) -> None:
+    from backend.storage.models import RawMarketData as RawMarketDataModel
+
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    run = await trigger_backfill(db_session, "AAPL")
+    response_payload = {"bars": [{"timestamp": "2024-01-02", "open": 100.0}]}
+    normalize_calls: list[dict[str, object]] = []
+
+    async def fake_persist(
+        session: AsyncSession,
+        *,
+        run_id: int,
+        response_payload: dict[str, Any],
+        symbol_id: int | None = None,
+        source: str | None = None,
+        request_params: dict[str, Any] | None = None,
+    ) -> RawMarketData:
+        return RawMarketDataModel(
+            id=1,
+            run_id=run_id,
+            symbol_id=symbol_id,
+            source=source,
+            request_params=request_params,
+            response_payload=None,
+            payload_object_key="raw/1/abc.json",
+            payload_size_bytes=123,
+        )
+
+    def normalize(payload: dict[str, object]) -> None:
+        normalize_calls.append(payload)
+
+    with patch(
+        "backend.ingestion.pipeline.persist_raw_fetch",
+        side_effect=fake_persist,
+    ):
+        await ingest_raw_data(
+            db_session,
+            run_id=run.id,
+            symbol_id=symbol.id,
+            response_payload=response_payload,
+            normalize=normalize,
+        )
+
+    assert normalize_calls == [response_payload]
+
+
+@pytest.mark.asyncio
 async def test_ingest_raw_data_rejects_async_normalize(
     db_session: AsyncSession,
 ) -> None:

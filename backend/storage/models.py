@@ -130,7 +130,11 @@ class RawMarketData(Base):
     )
     source: Mapped[str | None] = mapped_column(String(50))
     request_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    response_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    response_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True)
+    )
+    payload_object_key: Mapped[str | None] = mapped_column(String(512))
+    payload_size_bytes: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

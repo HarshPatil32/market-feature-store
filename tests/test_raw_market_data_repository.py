@@ -85,7 +85,7 @@ async def test_create_with_invalid_symbol_id_raises_integrity_error(
 
 
 @pytest.mark.asyncio
-async def test_null_response_payload_rejected_by_not_null_constraint(
+async def test_null_response_payload_without_object_key_rejected(
     db_session: AsyncSession,
 ) -> None:
     with pytest.raises(IntegrityError):
@@ -94,6 +94,47 @@ async def test_null_response_payload_rejected_by_not_null_constraint(
             {"payload": None},
         )
         await db_session.flush()
+
+
+@pytest.mark.asyncio
+async def test_create_with_object_key_and_no_inline_payload(
+    db_session: AsyncSession,
+) -> None:
+    repo = RawMarketDataRepository(db_session)
+    created = await repo.create(
+        response_payload=None,
+        payload_object_key="raw/1/abc.json",
+        payload_size_bytes=1024,
+    )
+    fetched = await repo.get_by_id(created.id)
+
+    assert fetched is not None
+    assert fetched.response_payload is None
+    assert fetched.payload_object_key == "raw/1/abc.json"
+    assert fetched.payload_size_bytes == 1024
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_both_payload_locations(
+    db_session: AsyncSession,
+) -> None:
+    repo = RawMarketDataRepository(db_session)
+
+    with pytest.raises(ValueError, match="exactly one of"):
+        await repo.create(
+            response_payload={"bars": []},
+            payload_object_key="raw/1/abc.json",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_neither_payload_location(
+    db_session: AsyncSession,
+) -> None:
+    repo = RawMarketDataRepository(db_session)
+
+    with pytest.raises(ValueError, match="exactly one of"):
+        await repo.create(response_payload=None)
 
 
 @pytest.mark.asyncio
