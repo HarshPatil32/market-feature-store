@@ -209,6 +209,28 @@ class RawMarketDataRepository:
     async def get_by_id(self, raw_market_data_id: int) -> RawMarketData | None:
         return await self._session.get(RawMarketData, raw_market_data_id)
 
+    async def list_by_symbol(
+        self,
+        symbol_id: int,
+        *,
+        run_id: int | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> Sequence[RawMarketData]:
+        stmt = (
+            select(RawMarketData)
+            .where(RawMarketData.symbol_id == symbol_id)
+            .order_by(RawMarketData.created_at, RawMarketData.id)
+        )
+        if run_id is not None:
+            stmt = stmt.where(RawMarketData.run_id == run_id)
+        if start is not None:
+            stmt = stmt.where(RawMarketData.created_at >= start)
+        if end is not None:
+            stmt = stmt.where(RawMarketData.created_at <= end)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
 
 class MarketBarRepository:
     def __init__(self, session: AsyncSession) -> None:
