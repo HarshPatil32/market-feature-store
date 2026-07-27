@@ -1,6 +1,6 @@
 """Tests for the standard internal Bar model."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -88,6 +88,22 @@ def test_bar_normalizes_source_case() -> None:
     bar = _valid_bar(source="ALPACA")
 
     assert bar.source == "alpaca"
+
+
+def test_bar_normalizes_ts_to_utc() -> None:
+    eastern = timezone(timedelta(hours=-4))
+    bar = _valid_bar(ts=datetime(2024, 1, 2, 1, 0, tzinfo=eastern))
+
+    assert bar.ts == datetime(2024, 1, 2, 5, 0, tzinfo=UTC)
+    assert bar.ts.utcoffset() == timedelta(0)
+
+
+def test_bar_utc_ts_is_unchanged() -> None:
+    ts = datetime(2024, 1, 2, 5, 0, tzinfo=UTC)
+    bar = _valid_bar(ts=ts)
+
+    assert bar.ts == ts
+    assert bar.ts.utcoffset() == timedelta(0)
 
 
 def test_bar_symbol_is_normalized() -> None:

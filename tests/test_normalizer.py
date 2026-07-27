@@ -1,6 +1,6 @@
 """Tests for raw market data normalization."""
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -111,8 +111,7 @@ def test_normalize_bars_returns_empty_list_for_empty_bars_dict() -> None:
     assert bars == []
 
 
-def test_normalize_bars_parses_non_utc_timestamp_offset() -> None:
-    eastern = timezone(timedelta(hours=-4))
+def test_normalize_bars_converts_non_utc_timestamp_offset_to_utc() -> None:
     payload = {
         "bars": {
             "AAPL": [
@@ -136,8 +135,7 @@ def test_normalize_bars_parses_non_utc_timestamp_offset() -> None:
     )
 
     assert len(bars) == 1
-    assert bars[0].ts == datetime(2024, 1, 2, 1, 0, tzinfo=eastern)
-    assert bars[0].ts.astimezone(UTC) == datetime(2024, 1, 2, 5, 0, tzinfo=UTC)
+    assert bars[0].ts == datetime(2024, 1, 2, 5, 0, tzinfo=UTC)
 
 
 def test_normalize_bars_raises_for_unknown_source() -> None:

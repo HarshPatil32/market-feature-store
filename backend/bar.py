@@ -1,5 +1,6 @@
 """Standard internal bar format shared across the pipeline."""
 
+from datetime import UTC
 from decimal import Decimal
 from typing import Annotated
 
@@ -51,6 +52,11 @@ class Bar(BaseModel):
     close: Decimal
     volume: Decimal
     source: Source
+
+    @field_validator("ts")
+    @classmethod
+    def _normalize_ts_to_utc(cls, value: AwareDatetime) -> AwareDatetime:
+        return value.astimezone(UTC)
 
     @field_validator("open", "high", "low", "close")
     @classmethod
