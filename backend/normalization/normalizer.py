@@ -7,10 +7,13 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
+import structlog
 from pydantic import ValidationError
 
 from backend.bar import Bar
 from backend.storage.schemas import Ticker
+
+logger = structlog.get_logger(__name__)
 
 
 class NormalizationError(Exception):
@@ -146,4 +149,17 @@ def normalize_bars(
             raise NormalizationError(
                 f"{normalized_source} bar payload is malformed (entry {index}): {exc}"
             ) from exc
-    return parsed
+
+    deduped: dict[datetime, Bar] = {}
+    for bar in parsed:
+        deduped[bar.ts] = bar
+    duplicate_count = len(parsed) - len(deduped)
+    if duplicate_count:
+        logger.debug(
+            "normalize_bars_dropped_duplicate_ts",
+            symbol=symbol,
+            timeframe=timeframe,
+            source=normalized_source,
+            duplicate_count=duplicate_count,
+        )
+    return list(deduped.values())

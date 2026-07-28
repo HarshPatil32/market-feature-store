@@ -263,6 +263,77 @@ def test_normalize_bars_raises_for_invalid_numeric_field(
         )
 
 
+def test_normalize_bars_dedups_same_timestamp_keeping_last() -> None:
+    payload = {
+        "bars": {
+            "AAPL": [
+                _alpaca_entry(o=187.15, c=188.01),
+                _alpaca_entry(o=190.0, c=191.0),
+            ]
+        }
+    }
+
+    bars = normalize_bars(
+        payload,
+        symbol="AAPL",
+        timeframe="1d",
+        source="alpaca",
+    )
+
+    assert len(bars) == 1
+    assert bars[0].ts == datetime(2024, 1, 2, 5, 0, tzinfo=UTC)
+    assert bars[0].open == Decimal("190.0")
+    assert bars[0].close == Decimal("191.0")
+
+
+def test_normalize_bars_dedup_preserves_chronological_order() -> None:
+    payload = {
+        "bars": {
+            "AAPL": [
+                _alpaca_entry(t="2024-01-02T05:00:00Z", o=187.15),
+                _alpaca_entry(t="2024-01-03T05:00:00Z", o=188.15),
+                _alpaca_entry(t="2024-01-02T05:00:00Z", o=190.0),
+                _alpaca_entry(t="2024-01-04T05:00:00Z", o=189.15),
+            ]
+        }
+    }
+
+    bars = normalize_bars(
+        payload,
+        symbol="AAPL",
+        timeframe="1d",
+        source="alpaca",
+    )
+
+    assert len(bars) == 3
+    assert bars[0].ts == datetime(2024, 1, 2, 5, 0, tzinfo=UTC)
+    assert bars[1].ts == datetime(2024, 1, 3, 5, 0, tzinfo=UTC)
+    assert bars[2].ts == datetime(2024, 1, 4, 5, 0, tzinfo=UTC)
+    assert bars[0].open == Decimal("190.0")
+
+
+def test_normalize_bars_dedup_across_equivalent_utc_offsets() -> None:
+    payload = {
+        "bars": {
+            "AAPL": [
+                _alpaca_entry(t="2024-01-02T05:00:00Z", o=187.15),
+                _alpaca_entry(t="2024-01-02T01:00:00-04:00", o=190.0),
+            ]
+        }
+    }
+
+    bars = normalize_bars(
+        payload,
+        symbol="AAPL",
+        timeframe="1d",
+        source="alpaca",
+    )
+
+    assert len(bars) == 1
+    assert bars[0].ts == datetime(2024, 1, 2, 5, 0, tzinfo=UTC)
+    assert bars[0].open == Decimal("190.0")
+
+
 def test_normalize_bars_names_offending_entry_index_in_batch() -> None:
     payload = {
         "bars": {
