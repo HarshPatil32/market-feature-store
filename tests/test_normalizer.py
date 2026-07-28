@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from math import inf, nan
 
 import pytest
 
@@ -34,6 +35,19 @@ def _sample_alpaca_payload(
         "bars": {symbol: bars},
         "next_page_token": None,
     }
+
+
+def _alpaca_entry(**overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "t": "2024-01-02T05:00:00Z",
+        "o": 187.15,
+        "h": 188.44,
+        "l": 186.89,
+        "c": 188.01,
+        "v": 45678900,
+    }
+    entry.update(overrides)
+    return entry
 
 
 def test_normalize_bars_maps_alpaca_fields_and_types() -> None:
@@ -215,6 +229,51 @@ def test_normalize_bars_raises_when_bar_entry_is_wrong_type() -> None:
     payload = {"bars": {"AAPL": ["not-a-dict"]}}
 
     with pytest.raises(NormalizationError, match="must be an object"):
+        normalize_bars(
+            payload,
+            symbol="AAPL",
+            timeframe="1d",
+            source="alpaca",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("o", None),
+        ("h", ""),
+        ("l", "not-a-number"),
+        ("c", True),
+        ("v", [1, 2]),
+        ("o", inf),
+        ("c", nan),
+    ],
+)
+def test_normalize_bars_raises_for_invalid_numeric_field(
+    field: str, bad_value: object
+) -> None:
+    payload = {"bars": {"AAPL": [_alpaca_entry(**{field: bad_value})]}}
+
+    with pytest.raises(NormalizationError, match=rf"field {field!r}"):
+        normalize_bars(
+            payload,
+            symbol="AAPL",
+            timeframe="1d",
+            source="alpaca",
+        )
+
+
+def test_normalize_bars_names_offending_entry_index_in_batch() -> None:
+    payload = {
+        "bars": {
+            "AAPL": [
+                _alpaca_entry(),
+                _alpaca_entry(o="not-a-number"),
+            ]
+        }
+    }
+
+    with pytest.raises(NormalizationError, match=r"entry 1"):
         normalize_bars(
             payload,
             symbol="AAPL",

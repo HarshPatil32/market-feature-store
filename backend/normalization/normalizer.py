@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -33,6 +33,18 @@ def _parse_timestamp(value: str) -> datetime:
     parsed = datetime.fromisoformat(normalized)
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _parse_decimal(value: Any, field: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise ValueError(
+            f"field {field!r} has invalid numeric value {value!r}"
+        ) from exc
+    if not parsed.is_finite():
+        raise ValueError(f"field {field!r} has invalid numeric value {value!r}")
     return parsed
 
 
@@ -77,11 +89,11 @@ def _map_alpaca_entry(
         symbol=symbol,
         ts=_parse_timestamp(timestamp),
         timeframe=timeframe,
-        open=Decimal(str(entry["o"])),
-        high=Decimal(str(entry["h"])),
-        low=Decimal(str(entry["l"])),
-        close=Decimal(str(entry["c"])),
-        volume=Decimal(str(entry["v"])),
+        open=_parse_decimal(entry["o"], "o"),
+        high=_parse_decimal(entry["h"], "h"),
+        low=_parse_decimal(entry["l"], "l"),
+        close=_parse_decimal(entry["c"], "c"),
+        volume=_parse_decimal(entry["v"], "v"),
         source=source,
     )
 
@@ -115,7 +127,7 @@ def normalize_bars(
 
     entries = extractor(payload, symbol)
     parsed: list[Bar] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         try:
             parsed.append(
                 mapper(
@@ -127,10 +139,11 @@ def normalize_bars(
             )
         except ValidationError as exc:
             raise NormalizationError(
-                f"{normalized_source} bar failed validation"
+                f"{normalized_source} bar failed validation (entry {index}): "
+                f"{str(exc).splitlines()[0]}"
             ) from exc
         except (KeyError, TypeError, ValueError) as exc:
             raise NormalizationError(
-                f"{normalized_source} bar payload is malformed"
+                f"{normalized_source} bar payload is malformed (entry {index}): {exc}"
             ) from exc
     return parsed
