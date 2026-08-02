@@ -13,6 +13,7 @@ from backend.validation.validator import (
     check_high_lt_low,
     check_negative_prices,
     check_zero_volume,
+    make_check_zero_volume,
     run_checks,
 )
 
@@ -21,6 +22,7 @@ def _make_bar(
     *,
     symbol: str = "AAPL",
     ts: datetime | None = None,
+    timeframe: str = "1d",
     open_: Decimal = Decimal("100"),
     high: Decimal = Decimal("105"),
     low: Decimal = Decimal("99"),
@@ -33,7 +35,7 @@ def _make_bar(
         return Bar.model_construct(
             symbol=symbol,
             ts=bar_ts,
-            timeframe="1d",
+            timeframe=timeframe,
             open=open_,
             high=high,
             low=low,
@@ -44,7 +46,7 @@ def _make_bar(
     return Bar(
         symbol=symbol,
         ts=bar_ts,
-        timeframe="1d",
+        timeframe=timeframe,
         open=open_,
         high=high,
         low=low,
@@ -86,6 +88,82 @@ def test_check_zero_volume_returns_warning_for_zero_volume() -> None:
     assert result.check == "zero_volume"
     assert result.severity == CheckSeverity.warning
     assert result.affected_ts == bar.ts
+
+
+def test_check_zero_volume_returns_error_for_negative_volume() -> None:
+    bar = _make_bar(volume=Decimal("-1"), skip_validation=True)
+    result = check_zero_volume(bar)
+
+    assert result is not None
+    assert result.check == "negative_volume"
+    assert result.severity == CheckSeverity.error
+    assert result.affected_ts == bar.ts
+    assert "-1" in (result.message or "")
+
+
+def test_make_check_zero_volume_uses_custom_default_severity() -> None:
+    check = make_check_zero_volume(default_severity=CheckSeverity.info)
+    result = check(_make_bar(volume=Decimal("0")))
+
+    assert result is not None
+    assert result.check == "zero_volume"
+    assert result.severity == CheckSeverity.info
+
+
+def test_make_check_zero_volume_applies_symbol_timeframe_override() -> None:
+    check = make_check_zero_volume(
+        overrides={("AAPL", "1d"): CheckSeverity.error},
+    )
+    result = check(_make_bar(volume=Decimal("0")))
+
+    assert result is not None
+    assert result.check == "zero_volume"
+    assert result.severity == CheckSeverity.error
+
+
+def test_make_check_zero_volume_override_suppresses_check() -> None:
+    check = make_check_zero_volume(overrides={("AAPL", "1d"): None})
+    assert check(_make_bar(volume=Decimal("0"))) is None
+
+
+def test_make_check_zero_volume_override_does_not_match_other_timeframe() -> None:
+    check = make_check_zero_volume(
+        overrides={("AAPL", "1h"): CheckSeverity.error},
+        default_severity=CheckSeverity.warning,
+    )
+    result = check(_make_bar(volume=Decimal("0"), timeframe="1d"))
+
+    assert result is not None
+    assert result.severity == CheckSeverity.warning
+
+
+def test_make_check_zero_volume_override_does_not_match_other_symbol() -> None:
+    check = make_check_zero_volume(
+        overrides={("MSFT", "1d"): None},
+        default_severity=CheckSeverity.warning,
+    )
+    result = check(_make_bar(volume=Decimal("0")))
+
+    assert result is not None
+    assert result.severity == CheckSeverity.warning
+
+
+def test_check_zero_volume_negative_volume_not_suppressable_by_override() -> None:
+    check = make_check_zero_volume(overrides={("AAPL", "1d"): None})
+    bar = _make_bar(volume=Decimal("-1"), skip_validation=True)
+    result = check(bar)
+
+    assert result is not None
+    assert result.check == "negative_volume"
+    assert result.severity == CheckSeverity.error
+
+
+def test_make_check_zero_volume_rejects_empty_override_key() -> None:
+    with pytest.raises(ValueError, match="symbol must not be empty"):
+        make_check_zero_volume(overrides={("", "1d"): CheckSeverity.error})
+
+    with pytest.raises(ValueError, match="timeframe must not be empty"):
+        make_check_zero_volume(overrides={("AAPL", ""): CheckSeverity.error})
 
 
 def test_check_negative_prices_returns_none_for_valid_bar() -> None:

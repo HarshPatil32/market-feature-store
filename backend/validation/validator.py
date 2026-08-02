@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -43,6 +43,7 @@ class QualityCheckResult(BaseModel):
 
 
 CheckFn = Callable[[Bar], QualityCheckResult | None]
+VolumeOverrides = Mapping[tuple[str, str], CheckSeverity | None]
 
 
 def check_high_lt_low(bar: Bar) -> QualityCheckResult | None:
@@ -57,16 +58,53 @@ def check_high_lt_low(bar: Bar) -> QualityCheckResult | None:
     )
 
 
-def check_zero_volume(bar: Bar) -> QualityCheckResult | None:
-    if bar.volume != Decimal("0"):
-        return None
-    return QualityCheckResult(
-        symbol=bar.symbol,
-        check="zero_volume",
-        severity=CheckSeverity.warning,
-        message="Volume is zero",
-        affected_ts=bar.ts,
-    )
+def _validate_volume_overrides(
+    overrides: VolumeOverrides,
+) -> dict[tuple[str, str], CheckSeverity | None]:
+    validated: dict[tuple[str, str], CheckSeverity | None] = {}
+    for (symbol, timeframe), severity in overrides.items():
+        if not symbol:
+            raise ValueError("volume override symbol must not be empty")
+        if not timeframe:
+            raise ValueError("volume override timeframe must not be empty")
+        validated[(symbol, timeframe)] = severity
+    return validated
+
+
+def make_check_zero_volume(
+    overrides: VolumeOverrides | None = None,
+    *,
+    default_severity: CheckSeverity = CheckSeverity.warning,
+) -> CheckFn:
+    resolved_overrides = _validate_volume_overrides(overrides or {})
+
+    def _check_volume(bar: Bar) -> QualityCheckResult | None:
+        if bar.volume < 0:
+            return QualityCheckResult(
+                symbol=bar.symbol,
+                check="negative_volume",
+                severity=CheckSeverity.error,
+                message=f"Negative volume: {bar.volume}",
+                affected_ts=bar.ts,
+            )
+        if bar.volume != Decimal("0"):
+            return None
+
+        severity = resolved_overrides.get((bar.symbol, bar.timeframe), default_severity)
+        if severity is None:
+            return None
+        return QualityCheckResult(
+            symbol=bar.symbol,
+            check="zero_volume",
+            severity=severity,
+            message="Volume is zero",
+            affected_ts=bar.ts,
+        )
+
+    return _check_volume
+
+
+check_zero_volume: CheckFn = make_check_zero_volume()
 
 
 def check_negative_prices(bar: Bar) -> QualityCheckResult | None:
