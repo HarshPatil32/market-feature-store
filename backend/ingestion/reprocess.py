@@ -17,6 +17,7 @@ from backend.storage.repository import (
     MarketBarRepository,
     RawMarketDataRepository,
 )
+from backend.validation.validator import QualityCheckResult
 
 logger = structlog.get_logger(__name__)
 
@@ -42,7 +43,7 @@ async def reprocess_from_raw(
     *,
     symbol_id: int,
     normalize: Callable[[dict[str, Any]], object],
-    validate: Callable[[Sequence[Bar]], Sequence[dict[str, Any]]] | None = None,
+    validate: Callable[[Sequence[Bar]], Sequence[QualityCheckResult]] | None = None,
     run_id: int | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
@@ -98,13 +99,12 @@ async def reprocess_from_raw(
                     )
 
                 if validate is not None:
-                    for check in validate(bars):
+                    for result in validate(bars):
                         staged_checks.append(
-                            {
-                                **check,
-                                "run_id": run.id,
-                                "symbol_id": symbol_id,
-                            }
+                            result.to_check_row(
+                                run_id=run.id,
+                                symbol_id=symbol_id,
+                            )
                         )
             inserted += len(bars)
         except Exception:
