@@ -58,6 +58,24 @@ def check_high_lt_low(bar: Bar) -> QualityCheckResult | None:
     )
 
 
+def check_open_close_outside_range(bar: Bar) -> QualityCheckResult | None:
+    violations = [
+        (field, value)
+        for field in ("open", "close")
+        if (value := getattr(bar, field)) < bar.low or value > bar.high
+    ]
+    if not violations:
+        return None
+    details = ", ".join(f"{field}={value}" for field, value in violations)
+    return QualityCheckResult(
+        symbol=bar.symbol,
+        check="open_close_outside_range",
+        severity=CheckSeverity.error,
+        message=f"Open/close outside [low, high] ({bar.low}, {bar.high}): {details}",
+        affected_ts=bar.ts,
+    )
+
+
 def _validate_volume_overrides(
     overrides: VolumeOverrides,
 ) -> dict[tuple[str, str], CheckSeverity | None]:
@@ -127,6 +145,7 @@ def check_negative_prices(bar: Bar) -> QualityCheckResult | None:
 
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
+    check_open_close_outside_range,
     check_zero_volume,
     check_negative_prices,
 )

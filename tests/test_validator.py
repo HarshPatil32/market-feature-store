@@ -12,6 +12,7 @@ from backend.validation.validator import (
     QualityCheckResult,
     check_high_lt_low,
     check_negative_prices,
+    check_open_close_outside_range,
     check_zero_volume,
     make_check_zero_volume,
     run_checks,
@@ -76,6 +77,107 @@ def test_check_high_lt_low_returns_result_when_high_below_low() -> None:
     message = result.message or ""
     assert "98" in message
     assert "99" in message
+
+
+def test_check_open_close_outside_range_returns_none_for_valid_bar() -> None:
+    assert check_open_close_outside_range(_make_bar()) is None
+
+
+def test_check_open_close_outside_range_returns_none_when_open_equals_low() -> None:
+    assert (
+        check_open_close_outside_range(
+            _make_bar(open_=Decimal("99"), low=Decimal("99"))
+        )
+        is None
+    )
+
+
+def test_check_open_close_outside_range_returns_none_when_close_equals_high() -> None:
+    assert (
+        check_open_close_outside_range(
+            _make_bar(close=Decimal("105"), high=Decimal("105"))
+        )
+        is None
+    )
+
+
+def test_check_open_close_outside_range_returns_none_when_open_equals_high() -> None:
+    assert (
+        check_open_close_outside_range(
+            _make_bar(open_=Decimal("105"), high=Decimal("105"))
+        )
+        is None
+    )
+
+
+def test_check_open_close_outside_range_returns_none_when_close_equals_low() -> None:
+    assert (
+        check_open_close_outside_range(
+            _make_bar(close=Decimal("99"), low=Decimal("99"))
+        )
+        is None
+    )
+
+
+def test_check_open_close_outside_range_returns_error_when_open_below_low() -> None:
+    bar = _make_bar(open_=Decimal("98"))
+    result = check_open_close_outside_range(bar)
+
+    assert result is not None
+    assert result.symbol == "AAPL"
+    assert result.check == "open_close_outside_range"
+    assert result.severity == CheckSeverity.error
+    assert result.affected_ts == bar.ts
+    assert "open=98" in (result.message or "")
+
+
+def test_check_open_close_outside_range_returns_error_when_open_above_high() -> None:
+    bar = _make_bar(open_=Decimal("106"))
+    result = check_open_close_outside_range(bar)
+
+    assert result is not None
+    assert result.check == "open_close_outside_range"
+    assert result.severity == CheckSeverity.error
+    assert "open=106" in (result.message or "")
+
+
+def test_check_open_close_outside_range_returns_error_when_close_below_low() -> None:
+    bar = _make_bar(close=Decimal("98"))
+    result = check_open_close_outside_range(bar)
+
+    assert result is not None
+    assert result.check == "open_close_outside_range"
+    assert result.severity == CheckSeverity.error
+    assert "close=98" in (result.message or "")
+
+
+def test_check_open_close_outside_range_returns_error_when_close_above_high() -> None:
+    bar = _make_bar(close=Decimal("106"))
+    result = check_open_close_outside_range(bar)
+
+    assert result is not None
+    assert result.check == "open_close_outside_range"
+    assert result.severity == CheckSeverity.error
+    assert "close=106" in (result.message or "")
+
+
+def test_check_open_close_outside_range_lists_both_fields_when_both_violate() -> None:
+    bar = _make_bar(open_=Decimal("98"), close=Decimal("106"))
+    result = check_open_close_outside_range(bar)
+
+    assert result is not None
+    message = result.message or ""
+    assert "open=98" in message
+    assert "close=106" in message
+
+
+def test_check_open_close_outside_range_fires_even_when_high_lt_low() -> None:
+    bar = _make_bar(high=Decimal("98"), low=Decimal("99"), open_=Decimal("100"))
+    result = check_open_close_outside_range(bar)
+
+    assert result is not None
+    assert result.check == "open_close_outside_range"
+    assert "open=100" in (result.message or "")
 
 
 def test_check_zero_volume_returns_none_for_nonzero_volume() -> None:
@@ -216,10 +318,10 @@ def test_run_checks_collects_results_from_multiple_bars() -> None:
 
     results = run_checks(bars)
 
-    assert len(results) == 3
     assert {result.check for result in results} == {
         "zero_volume",
         "high_lt_low",
+        "open_close_outside_range",
         "negative_prices",
     }
 
@@ -233,8 +335,12 @@ def test_run_checks_returns_multiple_results_for_same_bar() -> None:
 
     results = run_checks([bar])
 
-    assert len(results) == 2
-    assert {result.check for result in results} == {"high_lt_low", "zero_volume"}
+    assert len(results) == 3
+    assert {result.check for result in results} == {
+        "high_lt_low",
+        "open_close_outside_range",
+        "zero_volume",
+    }
     assert all(result.affected_ts == bar.ts for result in results)
 
 
