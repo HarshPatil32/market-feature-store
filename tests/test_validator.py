@@ -73,7 +73,9 @@ def test_check_high_lt_low_returns_result_when_high_below_low() -> None:
     assert result.check == "high_lt_low"
     assert result.severity == CheckSeverity.error
     assert result.affected_ts == bar.ts
-    assert "98" in (result.message or "")
+    message = result.message or ""
+    assert "98" in message
+    assert "99" in message
 
 
 def test_check_zero_volume_returns_none_for_nonzero_volume() -> None:
@@ -220,6 +222,20 @@ def test_run_checks_collects_results_from_multiple_bars() -> None:
         "high_lt_low",
         "negative_prices",
     }
+
+
+def test_run_checks_returns_multiple_results_for_same_bar() -> None:
+    bar = _make_bar(
+        high=Decimal("98"),
+        low=Decimal("99"),
+        volume=Decimal("0"),
+    )
+
+    results = run_checks([bar])
+
+    assert len(results) == 2
+    assert {result.check for result in results} == {"high_lt_low", "zero_volume"}
+    assert all(result.affected_ts == bar.ts for result in results)
 
 
 def test_run_checks_accepts_custom_check_list() -> None:
