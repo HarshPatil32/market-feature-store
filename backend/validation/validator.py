@@ -69,9 +69,28 @@ def check_zero_volume(bar: Bar) -> QualityCheckResult | None:
     )
 
 
+def check_negative_prices(bar: Bar) -> QualityCheckResult | None:
+    negative = [
+        (field, value)
+        for field in ("open", "high", "low", "close")
+        if (value := getattr(bar, field)) < 0
+    ]
+    if not negative:
+        return None
+    details = ", ".join(f"{field}={value}" for field, value in negative)
+    return QualityCheckResult(
+        symbol=bar.symbol,
+        check="negative_prices",
+        severity=CheckSeverity.error,
+        message=f"Negative price(s): {details}",
+        affected_ts=bar.ts,
+    )
+
+
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
     check_zero_volume,
+    check_negative_prices,
 )
 
 

@@ -11,6 +11,7 @@ from backend.storage.models import CheckSeverity
 from backend.validation.validator import (
     QualityCheckResult,
     check_high_lt_low,
+    check_negative_prices,
     check_zero_volume,
     run_checks,
 )
@@ -25,10 +26,24 @@ def _make_bar(
     low: Decimal = Decimal("99"),
     close: Decimal = Decimal("103"),
     volume: Decimal = Decimal("1000"),
+    skip_validation: bool = False,
 ) -> Bar:
+    bar_ts = ts or datetime(2024, 1, 2, tzinfo=UTC)
+    if skip_validation:
+        return Bar.model_construct(
+            symbol=symbol,
+            ts=bar_ts,
+            timeframe="1d",
+            open=open_,
+            high=high,
+            low=low,
+            close=close,
+            volume=volume,
+            source="fake",
+        )
     return Bar(
         symbol=symbol,
-        ts=ts or datetime(2024, 1, 2, tzinfo=UTC),
+        ts=bar_ts,
         timeframe="1d",
         open=open_,
         high=high,
@@ -73,6 +88,36 @@ def test_check_zero_volume_returns_warning_for_zero_volume() -> None:
     assert result.affected_ts == bar.ts
 
 
+def test_check_negative_prices_returns_none_for_valid_bar() -> None:
+    assert check_negative_prices(_make_bar()) is None
+
+
+def test_check_negative_prices_returns_error_when_price_is_negative() -> None:
+    bar = _make_bar(open_=Decimal("-1"), skip_validation=True)
+    result = check_negative_prices(bar)
+
+    assert result is not None
+    assert result.symbol == "AAPL"
+    assert result.check == "negative_prices"
+    assert result.severity == CheckSeverity.error
+    assert result.affected_ts == bar.ts
+    assert "open=-1" in (result.message or "")
+
+
+def test_check_negative_prices_lists_all_negative_fields() -> None:
+    bar = _make_bar(
+        open_=Decimal("-1"),
+        close=Decimal("-2"),
+        skip_validation=True,
+    )
+    result = check_negative_prices(bar)
+
+    assert result is not None
+    message = result.message or ""
+    assert "open=-1" in message
+    assert "close=-2" in message
+
+
 def test_run_checks_collects_results_from_multiple_bars() -> None:
     bars = [
         _make_bar(),
@@ -82,12 +127,21 @@ def test_run_checks_collects_results_from_multiple_bars() -> None:
             high=Decimal("98"),
             low=Decimal("99"),
         ),
+        _make_bar(
+            ts=datetime(2024, 1, 5, tzinfo=UTC),
+            open_=Decimal("-1"),
+            skip_validation=True,
+        ),
     ]
 
     results = run_checks(bars)
 
-    assert len(results) == 2
-    assert {result.check for result in results} == {"zero_volume", "high_lt_low"}
+    assert len(results) == 3
+    assert {result.check for result in results} == {
+        "zero_volume",
+        "high_lt_low",
+        "negative_prices",
+    }
 
 
 def test_run_checks_accepts_custom_check_list() -> None:
