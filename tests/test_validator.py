@@ -12,6 +12,7 @@ from backend.storage.models import CheckSeverity
 from backend.validation.validator import (
     QualityCheckResult,
     check_duplicate_bars,
+    check_empty_response,
     check_high_lt_low,
     check_missing_timestamps,
     check_negative_prices,
@@ -1003,3 +1004,59 @@ def test_make_check_stale_symbol_respects_custom_missing_data_severity() -> None
 
     assert result is not None
     assert result.severity == CheckSeverity.warning
+
+
+def test_check_empty_response_returns_none_for_non_empty_bars() -> None:
+    assert check_empty_response("AAPL", "1d", [_make_bar()]) is None
+
+
+def test_check_empty_response_returns_error_for_empty_bars() -> None:
+    result = check_empty_response("AAPL", "1d", [])
+
+    assert result is not None
+    assert result.symbol == "AAPL"
+    assert result.check == "empty_provider_response"
+    assert result.severity == CheckSeverity.error
+    assert result.affected_ts is None
+    assert "1d" in (result.message or "")
+
+
+def test_check_empty_response_includes_range_in_message_when_provided() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 31, tzinfo=UTC)
+
+    result = check_empty_response("AAPL", "1d", [], start=start, end=end)
+
+    assert result is not None
+    message = result.message or ""
+    assert start.isoformat() in message
+    assert end.isoformat() in message
+
+
+def test_check_empty_response_omits_range_when_not_provided() -> None:
+    result = check_empty_response("AAPL", "1d", [])
+
+    assert result is not None
+    assert "between" not in (result.message or "")
+
+
+def test_check_empty_response_omits_range_when_only_start_provided() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+
+    result = check_empty_response("AAPL", "1d", [], start=start)
+
+    assert result is not None
+    message = result.message or ""
+    assert "between" not in message
+    assert start.isoformat() not in message
+
+
+def test_check_empty_response_omits_range_when_only_end_provided() -> None:
+    end = datetime(2024, 1, 31, tzinfo=UTC)
+
+    result = check_empty_response("AAPL", "1d", [], end=end)
+
+    assert result is not None
+    message = result.message or ""
+    assert "between" not in message
+    assert end.isoformat() not in message

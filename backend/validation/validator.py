@@ -364,9 +364,37 @@ def make_check_stale_symbol(
 check_stale_symbol = make_check_stale_symbol()
 
 
+def check_empty_response(
+    symbol: Ticker,
+    timeframe: str,
+    bars: Sequence[Bar],
+    *,
+    start: AwareDatetime | None = None,
+    end: AwareDatetime | None = None,
+) -> QualityCheckResult | None:
+    if bars:
+        return None
+
+    message = f"Provider returned no bars for {timeframe}"
+    # Both bounds are required; a partial range is treated as no range.
+    if start is not None and end is not None:
+        message = (
+            f"Provider returned no bars for {timeframe} "
+            f"between {start.isoformat()} and {end.isoformat()}"
+        )
+
+    return QualityCheckResult(
+        symbol=symbol,
+        check="empty_provider_response",
+        severity=CheckSeverity.error,
+        message=message,
+    )
+
+
 # check_duplicate_bars is async and DB-backed; check_missing_timestamps,
-# check_price_jumps, and check_stale_symbol operate outside DEFAULT_CHECKS.
-# The batch checks and stale-symbol check must be invoked separately.
+# check_price_jumps, check_stale_symbol, and check_empty_response operate
+# outside DEFAULT_CHECKS. The batch checks and contextual checks must be
+# invoked separately.
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
     check_open_close_outside_range,
