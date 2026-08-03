@@ -294,10 +294,79 @@ def make_check_price_jump(
 
 check_price_jumps = make_check_price_jump()
 
+DEFAULT_STALE_INTRADAY_MULTIPLIER: int = 3
+DEFAULT_STALE_DAILY_MAX_AGE: timedelta = timedelta(days=3)
 
-# check_duplicate_bars is async and DB-backed; check_missing_timestamps and
-# check_price_jumps operate on a whole sorted batch. All three must be invoked
-# separately from DEFAULT_CHECKS.
+
+def _default_max_age(timeframe: str) -> timedelta:
+    """Fallback staleness threshold when no explicit override is given for a timeframe."""
+    step = _INTRADAY_STEPS.get(timeframe)
+    if step is not None:
+        return step * DEFAULT_STALE_INTRADAY_MULTIPLIER
+    return DEFAULT_STALE_DAILY_MAX_AGE
+
+
+def _validate_max_age_overrides(
+    overrides: Mapping[str, timedelta],
+) -> dict[str, timedelta]:
+    validated: dict[str, timedelta] = {}
+    for timeframe, max_age in overrides.items():
+        if not timeframe:
+            raise ValueError("max_age override timeframe must not be empty")
+        if max_age <= timedelta(0):
+            raise ValueError(f"max_age for timeframe {timeframe!r} must be positive")
+        validated[timeframe] = max_age
+    return validated
+
+
+def make_check_stale_symbol(
+    max_age_by_timeframe: Mapping[str, timedelta] | None = None,
+    *,
+    severity: CheckSeverity = CheckSeverity.warning,
+    missing_data_severity: CheckSeverity = CheckSeverity.error,
+) -> Callable[..., QualityCheckResult | None]:
+    overrides = _validate_max_age_overrides(max_age_by_timeframe or {})
+
+    def _check_stale_symbol(
+        symbol: Ticker,
+        timeframe: str,
+        last_ingested_at: AwareDatetime | None,
+        *,
+        now: AwareDatetime,
+    ) -> QualityCheckResult | None:
+        if last_ingested_at is None:
+            return QualityCheckResult(
+                symbol=symbol,
+                check="stale_symbol",
+                severity=missing_data_severity,
+                message="Symbol has never been ingested (last_ingested_at is not set)",
+            )
+
+        max_age = overrides.get(timeframe, _default_max_age(timeframe))
+        age = now - last_ingested_at
+        if age <= max_age:
+            return None
+
+        return QualityCheckResult(
+            symbol=symbol,
+            check="stale_symbol",
+            severity=severity,
+            message=(
+                f"No data ingested in {age} (last ingested at "
+                f"{last_ingested_at.isoformat()}, threshold {max_age})"
+            ),
+            affected_ts=last_ingested_at,
+        )
+
+    return _check_stale_symbol
+
+
+check_stale_symbol = make_check_stale_symbol()
+
+
+# check_duplicate_bars is async and DB-backed; check_missing_timestamps,
+# check_price_jumps, and check_stale_symbol operate outside DEFAULT_CHECKS.
+# The batch checks and stale-symbol check must be invoked separately.
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
     check_open_close_outside_range,

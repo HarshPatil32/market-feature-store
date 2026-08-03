@@ -1,7 +1,7 @@
 """Tests for data quality validation checks."""
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -17,8 +17,10 @@ from backend.validation.validator import (
     check_negative_prices,
     check_open_close_outside_range,
     check_price_jumps,
+    check_stale_symbol,
     check_zero_volume,
     make_check_price_jump,
+    make_check_stale_symbol,
     make_check_zero_volume,
     run_checks,
 )
@@ -860,3 +862,144 @@ def test_check_price_jumps_flags_multiple_non_contiguous_jumps() -> None:
     assert len(results) == 2
     assert results[0].affected_ts == ts2
     assert results[1].affected_ts == ts4
+
+
+def test_check_stale_symbol_returns_none_when_recent() -> None:
+    now = datetime(2024, 1, 5, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 4, tzinfo=UTC)
+
+    assert (
+        check_stale_symbol(
+            "AAPL",
+            "1d",
+            last_ingested,
+            now=now,
+        )
+        is None
+    )
+
+
+def test_check_stale_symbol_returns_warning_when_stale() -> None:
+    now = datetime(2024, 1, 10, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, tzinfo=UTC)
+
+    result = check_stale_symbol("AAPL", "1d", last_ingested, now=now)
+
+    assert result is not None
+    assert result.symbol == "AAPL"
+    assert result.check == "stale_symbol"
+    assert result.severity == CheckSeverity.warning
+    assert result.affected_ts == last_ingested
+    message = result.message or ""
+    assert last_ingested.isoformat() in message
+    assert "threshold 3 days" in message
+
+
+def test_check_stale_symbol_returns_none_at_exact_threshold() -> None:
+    now = datetime(2024, 1, 4, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, tzinfo=UTC)
+
+    assert check_stale_symbol("AAPL", "1d", last_ingested, now=now) is None
+
+
+def test_check_stale_symbol_uses_shorter_intraday_threshold() -> None:
+    now = datetime(2024, 1, 1, 12, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, 8, tzinfo=UTC)
+
+    result = check_stale_symbol("AAPL", "1h", last_ingested, now=now)
+
+    assert result is not None
+    assert result.check == "stale_symbol"
+    assert result.affected_ts == last_ingested
+
+
+def test_check_stale_symbol_returns_none_for_recent_intraday_data() -> None:
+    now = datetime(2024, 1, 1, 12, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, 11, tzinfo=UTC)
+
+    assert check_stale_symbol("AAPL", "1h", last_ingested, now=now) is None
+
+
+def test_check_stale_symbol_falls_back_to_daily_threshold_for_unknown_timeframe() -> (
+    None
+):
+    now = datetime(2024, 1, 10, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, tzinfo=UTC)
+
+    result = check_stale_symbol("AAPL", "1wk", last_ingested, now=now)
+
+    assert result is not None
+    assert result.check == "stale_symbol"
+    assert result.affected_ts == last_ingested
+
+
+def test_check_stale_symbol_returns_error_when_never_ingested() -> None:
+    now = datetime(2024, 1, 5, tzinfo=UTC)
+
+    result = check_stale_symbol("AAPL", "1d", None, now=now)
+
+    assert result is not None
+    assert result.check == "stale_symbol"
+    assert result.severity == CheckSeverity.error
+    assert result.affected_ts is None
+    assert "never been ingested" in (result.message or "")
+
+
+def test_make_check_stale_symbol_respects_custom_max_age_override() -> None:
+    check = make_check_stale_symbol(
+        max_age_by_timeframe={"1d": timedelta(days=1)},
+    )
+    now = datetime(2024, 1, 3, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, tzinfo=UTC)
+
+    result = check("AAPL", "1d", last_ingested, now=now)
+
+    assert result is not None
+    assert result.check == "stale_symbol"
+
+
+def test_make_check_stale_symbol_override_does_not_match_other_timeframe() -> None:
+    check = make_check_stale_symbol(
+        max_age_by_timeframe={"1d": timedelta(days=1)},
+    )
+    now = datetime(2024, 1, 1, 12, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, 8, tzinfo=UTC)
+
+    result = check("AAPL", "1h", last_ingested, now=now)
+
+    assert result is not None
+    assert result.check == "stale_symbol"
+
+
+def test_make_check_stale_symbol_rejects_empty_override_key() -> None:
+    with pytest.raises(ValueError, match="timeframe must not be empty"):
+        make_check_stale_symbol(max_age_by_timeframe={"": timedelta(days=1)})
+
+
+def test_make_check_stale_symbol_rejects_non_positive_max_age() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        make_check_stale_symbol(max_age_by_timeframe={"1d": timedelta(0)})
+
+    with pytest.raises(ValueError, match="must be positive"):
+        make_check_stale_symbol(max_age_by_timeframe={"1d": timedelta(days=-1)})
+
+
+def test_make_check_stale_symbol_respects_custom_severity() -> None:
+    check = make_check_stale_symbol(severity=CheckSeverity.error)
+    now = datetime(2024, 1, 10, tzinfo=UTC)
+    last_ingested = datetime(2024, 1, 1, tzinfo=UTC)
+
+    result = check("AAPL", "1d", last_ingested, now=now)
+
+    assert result is not None
+    assert result.severity == CheckSeverity.error
+
+
+def test_make_check_stale_symbol_respects_custom_missing_data_severity() -> None:
+    check = make_check_stale_symbol(missing_data_severity=CheckSeverity.warning)
+    now = datetime(2024, 1, 5, tzinfo=UTC)
+
+    result = check("AAPL", "1d", None, now=now)
+
+    assert result is not None
+    assert result.severity == CheckSeverity.warning
