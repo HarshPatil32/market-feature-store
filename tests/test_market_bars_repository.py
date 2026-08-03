@@ -1,6 +1,6 @@
 """Tests for MarketBarRepository CRUD and upsert operations."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TypedDict
 
@@ -244,3 +244,124 @@ async def test_get_by_id_returns_none_for_missing_row(db_session: AsyncSession) 
     bar_repo = MarketBarRepository(db_session)
 
     assert await bar_repo.get_by_id(999_999) is None
+
+
+@pytest.mark.asyncio
+async def test_get_existing_timestamps_returns_matching_timestamps(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 2, tzinfo=UTC)
+    ts3 = datetime(2024, 1, 3, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts1))
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts2))
+
+    existing = await bar_repo.get_existing_timestamps(
+        symbol.id,
+        timeframe="1d",
+        timestamps=[ts1, ts2, ts3],
+    )
+
+    assert existing == {ts1, ts2}
+
+
+@pytest.mark.asyncio
+async def test_get_existing_timestamps_scoped_by_symbol_and_timeframe(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    aapl = await symbol_repo.create(symbol="AAPL")
+    msft = await symbol_repo.create(symbol="MSFT")
+
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=aapl.id, timestamp=ts))
+    await bar_repo.upsert(
+        **_bar_kwargs(symbol_id=aapl.id, timestamp=ts, timeframe="1h")
+    )
+
+    assert (
+        await bar_repo.get_existing_timestamps(
+            msft.id,
+            timeframe="1d",
+            timestamps=[ts],
+        )
+        == set()
+    )
+
+    assert await bar_repo.get_existing_timestamps(
+        aapl.id,
+        timeframe="1h",
+        timestamps=[ts],
+    ) == {ts}
+
+    assert await bar_repo.get_existing_timestamps(
+        aapl.id,
+        timeframe="1d",
+        timestamps=[ts],
+    ) == {ts}
+
+
+@pytest.mark.asyncio
+async def test_get_existing_timestamps_returns_empty_when_none_match(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    existing = await bar_repo.get_existing_timestamps(
+        symbol.id,
+        timeframe="1d",
+        timestamps=[datetime(2024, 1, 2, tzinfo=UTC)],
+    )
+
+    assert existing == set()
+
+
+@pytest.mark.asyncio
+async def test_get_existing_timestamps_returns_empty_for_empty_input(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    assert (
+        await bar_repo.get_existing_timestamps(
+            symbol.id,
+            timeframe="1d",
+            timestamps=[],
+        )
+        == set()
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_existing_timestamps_chunks_large_input(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts1))
+
+    timestamps = [
+        datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=day) for day in range(1500)
+    ]
+
+    existing = await bar_repo.get_existing_timestamps(
+        symbol.id,
+        timeframe="1d",
+        timestamps=timestamps,
+    )
+
+    assert existing == {ts1}

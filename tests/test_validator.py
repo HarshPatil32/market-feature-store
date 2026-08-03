@@ -1,5 +1,6 @@
 """Tests for data quality validation checks."""
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ from backend.bar import Bar
 from backend.storage.models import CheckSeverity
 from backend.validation.validator import (
     QualityCheckResult,
+    check_duplicate_bars,
     check_high_lt_low,
     check_negative_prices,
     check_open_close_outside_range,
@@ -55,6 +57,22 @@ def _make_bar(
         volume=volume,
         source="fake",
     )
+
+
+class _FakeMarketBarRepository:
+    def __init__(self, existing: set[datetime]) -> None:
+        self._existing = existing
+        self.calls: list[tuple[int, str, list[datetime]]] = []
+
+    async def get_existing_timestamps(
+        self,
+        symbol_id: int,
+        *,
+        timeframe: str,
+        timestamps: Sequence[datetime],
+    ) -> set[datetime]:
+        self.calls.append((symbol_id, timeframe, list(timestamps)))
+        return {ts for ts in timestamps if ts in self._existing}
 
 
 def test_check_high_lt_low_returns_none_for_valid_bar() -> None:
@@ -401,3 +419,78 @@ def test_to_check_row_uses_result_run_id_when_not_overridden() -> None:
     row = result.to_check_row(symbol_id=1)
 
     assert row["run_id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_check_duplicate_bars_returns_empty_when_no_duplicates() -> None:
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+    repo = _FakeMarketBarRepository(set())
+
+    results = await check_duplicate_bars(
+        [_make_bar(ts=ts)],
+        symbol_id=1,
+        repository=repo,
+    )
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_check_duplicate_bars_returns_empty_for_empty_bars() -> None:
+    repo = _FakeMarketBarRepository({datetime(2024, 1, 2, tzinfo=UTC)})
+
+    results = await check_duplicate_bars([], symbol_id=1, repository=repo)
+
+    assert results == []
+    assert repo.calls == []
+
+
+@pytest.mark.asyncio
+async def test_check_duplicate_bars_flags_existing_bar() -> None:
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+    bar = _make_bar(ts=ts)
+    repo = _FakeMarketBarRepository({ts})
+
+    results = await check_duplicate_bars([bar], symbol_id=42, repository=repo)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.check == "duplicate_bar"
+    assert result.severity == CheckSeverity.warning
+    assert result.affected_ts == ts
+    assert result.symbol == "AAPL"
+    assert ts.isoformat() in (result.message or "")
+
+
+@pytest.mark.asyncio
+async def test_check_duplicate_bars_flags_only_duplicates_in_mixed_batch() -> None:
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 2, tzinfo=UTC)
+    ts3 = datetime(2024, 1, 3, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=ts1),
+        _make_bar(ts=ts2),
+        _make_bar(ts=ts3),
+    ]
+    repo = _FakeMarketBarRepository({ts1, ts3})
+
+    results = await check_duplicate_bars(bars, symbol_id=1, repository=repo)
+
+    assert {result.affected_ts for result in results} == {ts1, ts3}
+
+
+@pytest.mark.asyncio
+async def test_check_duplicate_bars_groups_queries_by_timeframe() -> None:
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=ts, timeframe="1d"),
+        _make_bar(ts=ts, timeframe="1h"),
+    ]
+    repo = _FakeMarketBarRepository({ts})
+
+    await check_duplicate_bars(bars, symbol_id=7, repository=repo)
+
+    assert repo.calls == [
+        (7, "1d", [ts]),
+        (7, "1h", [ts]),
+    ]

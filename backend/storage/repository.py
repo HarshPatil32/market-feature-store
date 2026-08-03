@@ -298,6 +298,29 @@ class MarketBarRepository:
         result = await self._session.execute(stmt)
         return result.scalars().all()
 
+    async def get_existing_timestamps(
+        self,
+        symbol_id: int,
+        *,
+        timeframe: str,
+        timestamps: Sequence[datetime],
+    ) -> set[datetime]:
+        if not timestamps:
+            return set()
+
+        existing: set[datetime] = set()
+        batch_size = 1000
+        for start in range(0, len(timestamps), batch_size):
+            batch = timestamps[start : start + batch_size]
+            stmt = select(MarketBar.timestamp).where(
+                MarketBar.symbol_id == symbol_id,
+                MarketBar.timeframe == timeframe,
+                MarketBar.timestamp.in_(batch),
+            )
+            result = await self._session.execute(stmt)
+            existing.update(result.scalars().all())
+        return existing
+
 
 class DataQualityCheckRepository:
     def __init__(self, session: AsyncSession) -> None:

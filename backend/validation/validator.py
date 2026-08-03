@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
@@ -44,6 +46,16 @@ class QualityCheckResult(BaseModel):
 
 CheckFn = Callable[[Bar], QualityCheckResult | None]
 VolumeOverrides = Mapping[tuple[str, str], CheckSeverity | None]
+
+
+class BarTimestampLookup(Protocol):
+    async def get_existing_timestamps(
+        self,
+        symbol_id: int,
+        *,
+        timeframe: str,
+        timestamps: Sequence[datetime],
+    ) -> set[datetime]: ...
 
 
 def check_high_lt_low(bar: Bar) -> QualityCheckResult | None:
@@ -143,12 +155,51 @@ def check_negative_prices(bar: Bar) -> QualityCheckResult | None:
     )
 
 
+# check_duplicate_bars is async and DB-backed; invoke it separately before upsert.
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
     check_open_close_outside_range,
     check_zero_volume,
     check_negative_prices,
 )
+
+
+async def check_duplicate_bars(
+    bars: Sequence[Bar],
+    *,
+    symbol_id: int,
+    repository: BarTimestampLookup,
+) -> list[QualityCheckResult]:
+    if not bars:
+        return []
+
+    by_timeframe: dict[str, list[Bar]] = defaultdict(list)
+    for bar in bars:
+        by_timeframe[bar.timeframe].append(bar)
+
+    results: list[QualityCheckResult] = []
+    for timeframe, group in by_timeframe.items():
+        timestamps = [bar.ts for bar in group]
+        existing = await repository.get_existing_timestamps(
+            symbol_id,
+            timeframe=timeframe,
+            timestamps=timestamps,
+        )
+        for bar in group:
+            if bar.ts not in existing:
+                continue
+            results.append(
+                QualityCheckResult(
+                    symbol=bar.symbol,
+                    check="duplicate_bar",
+                    severity=CheckSeverity.warning,
+                    message=(
+                        f"Bar for {bar.timeframe} at {bar.ts.isoformat()} already exists"
+                    ),
+                    affected_ts=bar.ts,
+                )
+            )
+    return results
 
 
 def run_checks(

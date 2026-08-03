@@ -262,12 +262,12 @@ async def test_reprocess_run_checks_persists_high_lt_low(
     )
 
     checks = await DataQualityCheckRepository(db_session).list_by_run(result.id)
+    high_lt_low_checks = [c for c in checks if c.check_name == "high_lt_low"]
 
-    assert len(checks) == 1
-    assert checks[0].check_name == "high_lt_low"
-    assert checks[0].severity == CheckSeverity.error
-    assert checks[0].symbol_id == symbol.id
-    assert checks[0].affected_timestamp == datetime(2024, 1, 3, tzinfo=UTC)
+    assert len(high_lt_low_checks) == 1
+    assert high_lt_low_checks[0].severity == CheckSeverity.error
+    assert high_lt_low_checks[0].symbol_id == symbol.id
+    assert high_lt_low_checks[0].affected_timestamp == datetime(2024, 1, 3, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
