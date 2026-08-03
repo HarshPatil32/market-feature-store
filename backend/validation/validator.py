@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -155,7 +155,105 @@ def check_negative_prices(bar: Bar) -> QualityCheckResult | None:
     )
 
 
-# check_duplicate_bars is async and DB-backed; invoke it separately before upsert.
+# Known intraday cadences; add new timeframes here when ingestion supports them.
+_INTRADAY_STEPS: dict[str, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+}
+_DAILY_TIMEFRAME = "1d"
+
+
+def _missing_weekdays(prev_ts: datetime, curr_ts: datetime) -> list[datetime]:
+    """Weekdays (Mon-Fri) strictly between prev_ts and curr_ts calendar dates."""
+    tz = prev_ts.tzinfo
+    prev_date = prev_ts.date()
+    curr_date = curr_ts.date()
+    missing: list[datetime] = []
+    cursor: date = prev_date + timedelta(days=1)
+    while cursor < curr_date:
+        if cursor.weekday() < 5:
+            missing.append(datetime(cursor.year, cursor.month, cursor.day, tzinfo=tz))
+        cursor += timedelta(days=1)
+    return missing
+
+
+def _daily_gaps(
+    symbol: str,
+    ordered: Sequence[Bar],
+) -> list[QualityCheckResult]:
+    results: list[QualityCheckResult] = []
+    for prev, curr in zip(ordered, ordered[1:]):
+        missing = _missing_weekdays(prev.ts, curr.ts)
+        if not missing:
+            continue
+        results.append(
+            QualityCheckResult(
+                symbol=symbol,
+                check="missing_trading_days",
+                severity=CheckSeverity.warning,
+                message=(
+                    f"Missing {len(missing)} expected trading day(s) between "
+                    f"{missing[0].isoformat()} and {missing[-1].isoformat()}"
+                ),
+                affected_ts=missing[0],
+            )
+        )
+    return results
+
+
+def _intraday_gaps(
+    symbol: str,
+    timeframe: str,
+    ordered: Sequence[Bar],
+    step: timedelta,
+) -> list[QualityCheckResult]:
+    results: list[QualityCheckResult] = []
+    for prev, curr in zip(ordered, ordered[1:]):
+        if prev.ts.date() != curr.ts.date():
+            continue
+        gap_count = (curr.ts - prev.ts) // step - 1
+        if gap_count <= 0:
+            continue
+        range_start = prev.ts + step
+        range_end = curr.ts - step
+        results.append(
+            QualityCheckResult(
+                symbol=symbol,
+                check="missing_timestamps",
+                severity=CheckSeverity.warning,
+                message=(
+                    f"Missing {gap_count} expected {timeframe} bar(s) between "
+                    f"{range_start.isoformat()} and {range_end.isoformat()}"
+                ),
+                affected_ts=range_start,
+            )
+        )
+    return results
+
+
+def check_missing_timestamps(bars: Sequence[Bar]) -> list[QualityCheckResult]:
+    """Detect gaps within a batch of bars for a symbol and timeframe."""
+    by_group: dict[tuple[str, str], list[Bar]] = defaultdict(list)
+    for bar in bars:
+        by_group[(bar.symbol, bar.timeframe)].append(bar)
+
+    results: list[QualityCheckResult] = []
+    for (symbol, timeframe), group in by_group.items():
+        ordered = sorted(group, key=lambda bar: bar.ts)
+        if timeframe == _DAILY_TIMEFRAME:
+            results.extend(_daily_gaps(symbol, ordered))
+        elif timeframe in _INTRADAY_STEPS:
+            results.extend(
+                _intraday_gaps(symbol, timeframe, ordered, _INTRADAY_STEPS[timeframe])
+            )
+    return results
+
+
+# check_duplicate_bars is async and DB-backed; check_missing_timestamps operates on a
+# whole sorted batch. Both must be invoked separately from DEFAULT_CHECKS.
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
     check_open_close_outside_range,

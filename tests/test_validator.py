@@ -13,6 +13,7 @@ from backend.validation.validator import (
     QualityCheckResult,
     check_duplicate_bars,
     check_high_lt_low,
+    check_missing_timestamps,
     check_negative_prices,
     check_open_close_outside_range,
     check_zero_volume,
@@ -494,3 +495,214 @@ async def test_check_duplicate_bars_groups_queries_by_timeframe() -> None:
         (7, "1d", [ts]),
         (7, "1h", [ts]),
     ]
+
+
+def test_check_missing_timestamps_returns_empty_for_empty_or_single_bar() -> None:
+    assert check_missing_timestamps([]) == []
+    assert check_missing_timestamps([_make_bar()]) == []
+
+
+def test_check_missing_timestamps_returns_empty_for_consecutive_daily_bars() -> None:
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC)),
+    ]
+
+    assert check_missing_timestamps(bars) == []
+
+
+def test_check_missing_timestamps_ignores_weekend_between_daily_bars() -> None:
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 5, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 8, tzinfo=UTC)),
+    ]
+
+    assert check_missing_timestamps(bars) == []
+
+
+def test_check_missing_timestamps_flags_skipped_weekday() -> None:
+    monday = datetime(2024, 1, 1, tzinfo=UTC)
+    wednesday = datetime(2024, 1, 3, tzinfo=UTC)
+    tuesday = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=monday),
+        _make_bar(ts=wednesday),
+    ]
+
+    results = check_missing_timestamps(bars)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.check == "missing_trading_days"
+    assert result.severity == CheckSeverity.warning
+    assert result.symbol == "AAPL"
+    assert result.affected_ts == tuesday
+    message = result.message or ""
+    assert "1 expected trading day" in message
+    assert tuesday.isoformat() in message
+
+
+def test_check_missing_timestamps_flags_multiple_weekdays_before_weekend() -> None:
+    wednesday = datetime(2024, 1, 3, tzinfo=UTC)
+    monday = datetime(2024, 1, 8, tzinfo=UTC)
+    thursday = datetime(2024, 1, 4, tzinfo=UTC)
+    friday = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=wednesday),
+        _make_bar(ts=monday),
+    ]
+
+    results = check_missing_timestamps(bars)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.check == "missing_trading_days"
+    assert result.affected_ts == thursday
+    message = result.message or ""
+    assert "2 expected trading day" in message
+    assert thursday.isoformat() in message
+    assert friday.isoformat() in message
+
+
+def test_check_missing_timestamps_sorts_unordered_daily_bars() -> None:
+    monday = datetime(2024, 1, 1, tzinfo=UTC)
+    wednesday = datetime(2024, 1, 3, tzinfo=UTC)
+    tuesday = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=wednesday),
+        _make_bar(ts=monday),
+    ]
+
+    results = check_missing_timestamps(bars)
+
+    assert len(results) == 1
+    assert results[0].affected_ts == tuesday
+
+
+def test_check_missing_timestamps_groups_by_symbol_and_timeframe() -> None:
+    monday = datetime(2024, 1, 1, tzinfo=UTC)
+    wednesday = datetime(2024, 1, 3, tzinfo=UTC)
+    tuesday = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(symbol="AAPL", ts=monday),
+        _make_bar(symbol="AAPL", ts=wednesday),
+        _make_bar(symbol="MSFT", ts=monday),
+        _make_bar(symbol="MSFT", ts=wednesday),
+        _make_bar(
+            symbol="AAPL",
+            ts=datetime(2024, 1, 1, 9, tzinfo=UTC),
+            timeframe="1h",
+        ),
+        _make_bar(
+            symbol="AAPL",
+            ts=datetime(2024, 1, 1, 10, tzinfo=UTC),
+            timeframe="1h",
+        ),
+    ]
+
+    results = check_missing_timestamps(bars)
+
+    assert len(results) == 2
+    assert {result.symbol for result in results} == {"AAPL", "MSFT"}
+    assert all(result.check == "missing_trading_days" for result in results)
+    assert all(result.affected_ts == tuesday for result in results)
+
+
+def test_check_missing_timestamps_flags_multiple_non_contiguous_gaps() -> None:
+    monday = datetime(2024, 1, 1, tzinfo=UTC)
+    wednesday = datetime(2024, 1, 3, tzinfo=UTC)
+    friday = datetime(2024, 1, 5, tzinfo=UTC)
+    tuesday = datetime(2024, 1, 2, tzinfo=UTC)
+    thursday = datetime(2024, 1, 4, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=monday),
+        _make_bar(ts=wednesday),
+        _make_bar(ts=friday),
+    ]
+
+    results = check_missing_timestamps(bars)
+
+    assert len(results) == 2
+    assert results[0].affected_ts == tuesday
+    assert results[1].affected_ts == thursday
+    assert all(result.check == "missing_trading_days" for result in results)
+
+
+def test_check_missing_timestamps_uses_calendar_dates_for_daily_gaps() -> None:
+    monday = datetime(2024, 1, 1, 9, 30, tzinfo=UTC)
+    wednesday = datetime(2024, 1, 3, 10, tzinfo=UTC)
+    tuesday = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=monday),
+        _make_bar(ts=wednesday),
+    ]
+
+    results = check_missing_timestamps(bars)
+
+    assert len(results) == 1
+    assert results[0].affected_ts == tuesday
+
+
+def test_check_missing_timestamps_ignores_consecutive_days_with_different_times() -> (
+    None
+):
+    monday = datetime(2024, 1, 1, 9, 30, tzinfo=UTC)
+    tuesday = datetime(2024, 1, 2, 9, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=monday),
+        _make_bar(ts=tuesday),
+    ]
+
+    assert check_missing_timestamps(bars) == []
+
+
+def test_check_missing_timestamps_skips_unknown_timeframe() -> None:
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC), timeframe="1wk"),
+        _make_bar(ts=datetime(2024, 1, 15, tzinfo=UTC), timeframe="1wk"),
+    ]
+
+    assert check_missing_timestamps(bars) == []
+
+
+def test_check_missing_timestamps_flags_same_day_intraday_gap() -> None:
+    bars = [
+        _make_bar(
+            ts=datetime(2024, 1, 2, 9, 30, tzinfo=UTC),
+            timeframe="1h",
+        ),
+        _make_bar(
+            ts=datetime(2024, 1, 2, 10, 30, tzinfo=UTC),
+            timeframe="1h",
+        ),
+        _make_bar(
+            ts=datetime(2024, 1, 2, 12, 30, tzinfo=UTC),
+            timeframe="1h",
+        ),
+    ]
+
+    results = check_missing_timestamps(bars)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.check == "missing_timestamps"
+    assert result.severity == CheckSeverity.warning
+    assert result.affected_ts == datetime(2024, 1, 2, 11, 30, tzinfo=UTC)
+    message = result.message or ""
+    assert "1 expected 1h bar" in message
+    assert datetime(2024, 1, 2, 11, 30, tzinfo=UTC).isoformat() in message
+
+
+def test_check_missing_timestamps_ignores_overnight_intraday_gap() -> None:
+    bars = [
+        _make_bar(
+            ts=datetime(2024, 1, 2, 16, tzinfo=UTC),
+            timeframe="1h",
+        ),
+        _make_bar(
+            ts=datetime(2024, 1, 3, 9, 30, tzinfo=UTC),
+            timeframe="1h",
+        ),
+    ]
+
+    assert check_missing_timestamps(bars) == []
