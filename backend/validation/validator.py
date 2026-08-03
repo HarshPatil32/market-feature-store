@@ -164,6 +164,7 @@ _INTRADAY_STEPS: dict[str, timedelta] = {
     "1h": timedelta(hours=1),
 }
 _DAILY_TIMEFRAME = "1d"
+DEFAULT_PRICE_JUMP_THRESHOLD_PCT: Decimal = Decimal("0.20")
 
 
 def _missing_weekdays(prev_ts: datetime, curr_ts: datetime) -> list[datetime]:
@@ -252,8 +253,51 @@ def check_missing_timestamps(bars: Sequence[Bar]) -> list[QualityCheckResult]:
     return results
 
 
-# check_duplicate_bars is async and DB-backed; check_missing_timestamps operates on a
-# whole sorted batch. Both must be invoked separately from DEFAULT_CHECKS.
+def make_check_price_jump(
+    threshold_pct: Decimal = DEFAULT_PRICE_JUMP_THRESHOLD_PCT,
+    *,
+    severity: CheckSeverity = CheckSeverity.warning,
+) -> Callable[[Sequence[Bar]], list[QualityCheckResult]]:
+    threshold_display = threshold_pct * 100
+
+    def _check_price_jumps(bars: Sequence[Bar]) -> list[QualityCheckResult]:
+        by_group: dict[tuple[str, str], list[Bar]] = defaultdict(list)
+        for bar in bars:
+            by_group[(bar.symbol, bar.timeframe)].append(bar)
+
+        results: list[QualityCheckResult] = []
+        for (symbol, _timeframe), group in by_group.items():
+            ordered = sorted(group, key=lambda bar: bar.ts)
+            for prev, curr in zip(ordered, ordered[1:]):
+                # Bar.close is validated > 0, so prev.close is never zero.
+                change_pct = abs(curr.close - prev.close) / prev.close
+                if change_pct <= threshold_pct:
+                    continue
+                pct_display = change_pct * 100
+                results.append(
+                    QualityCheckResult(
+                        symbol=symbol,
+                        check="price_jump",
+                        severity=severity,
+                        message=(
+                            f"Close jumped from {prev.close} to {curr.close} "
+                            f"({pct_display:.2f}% change, threshold "
+                            f"{threshold_display:.2f}%)"
+                        ),
+                        affected_ts=curr.ts,
+                    )
+                )
+        return results
+
+    return _check_price_jumps
+
+
+check_price_jumps = make_check_price_jump()
+
+
+# check_duplicate_bars is async and DB-backed; check_missing_timestamps and
+# check_price_jumps operate on a whole sorted batch. All three must be invoked
+# separately from DEFAULT_CHECKS.
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
     check_open_close_outside_range,

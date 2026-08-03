@@ -16,7 +16,9 @@ from backend.validation.validator import (
     check_missing_timestamps,
     check_negative_prices,
     check_open_close_outside_range,
+    check_price_jumps,
     check_zero_volume,
+    make_check_price_jump,
     make_check_zero_volume,
     run_checks,
 )
@@ -706,3 +708,155 @@ def test_check_missing_timestamps_ignores_overnight_intraday_gap() -> None:
     ]
 
     assert check_missing_timestamps(bars) == []
+
+
+def test_check_price_jumps_returns_empty_for_empty_or_single_bar() -> None:
+    assert check_price_jumps([]) == []
+    assert check_price_jumps([_make_bar()]) == []
+
+
+def test_check_price_jumps_returns_empty_when_within_threshold() -> None:
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC), close=Decimal("100")),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC), close=Decimal("115")),
+    ]
+
+    assert check_price_jumps(bars) == []
+
+
+def test_check_price_jumps_flags_upward_move_exceeding_threshold() -> None:
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=ts1, close=Decimal("100")),
+        _make_bar(ts=ts2, close=Decimal("125")),
+    ]
+
+    results = check_price_jumps(bars)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.check == "price_jump"
+    assert result.severity == CheckSeverity.warning
+    assert result.symbol == "AAPL"
+    assert result.affected_ts == ts2
+    message = result.message or ""
+    assert "100" in message
+    assert "125" in message
+    assert "25.00%" in message
+
+
+def test_check_price_jumps_flags_downward_move_exceeding_threshold() -> None:
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=ts1, close=Decimal("100")),
+        _make_bar(ts=ts2, close=Decimal("75")),
+    ]
+
+    results = check_price_jumps(bars)
+
+    assert len(results) == 1
+    assert results[0].check == "price_jump"
+    assert results[0].affected_ts == ts2
+    message = results[0].message or ""
+    assert "100" in message
+    assert "75" in message
+    assert "25.00%" in message
+
+
+def test_check_price_jumps_does_not_flag_change_at_exact_threshold() -> None:
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC), close=Decimal("100")),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC), close=Decimal("120")),
+    ]
+
+    assert check_price_jumps(bars) == []
+
+
+def test_make_check_price_jump_uses_custom_threshold() -> None:
+    check = make_check_price_jump(threshold_pct=Decimal("0.10"))
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC), close=Decimal("100")),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC), close=Decimal("115")),
+    ]
+
+    results = check(bars)
+
+    assert len(results) == 1
+    assert results[0].check == "price_jump"
+
+
+def test_make_check_price_jump_uses_custom_severity() -> None:
+    check = make_check_price_jump(severity=CheckSeverity.error)
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC), close=Decimal("100")),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC), close=Decimal("125")),
+    ]
+
+    results = check(bars)
+
+    assert len(results) == 1
+    assert results[0].severity == CheckSeverity.error
+
+
+def test_check_price_jumps_groups_by_symbol_and_timeframe() -> None:
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(symbol="AAPL", ts=ts1, close=Decimal("100")),
+        _make_bar(symbol="AAPL", ts=ts2, close=Decimal("125")),
+        _make_bar(symbol="MSFT", ts=ts1, close=Decimal("100")),
+        _make_bar(symbol="MSFT", ts=ts2, close=Decimal("105")),
+        _make_bar(
+            symbol="AAPL",
+            ts=datetime(2024, 1, 1, 9, tzinfo=UTC),
+            timeframe="1h",
+            close=Decimal("100"),
+        ),
+        _make_bar(
+            symbol="AAPL",
+            ts=datetime(2024, 1, 1, 10, tzinfo=UTC),
+            timeframe="1h",
+            close=Decimal("105"),
+        ),
+    ]
+
+    results = check_price_jumps(bars)
+
+    assert len(results) == 1
+    assert results[0].symbol == "AAPL"
+    assert results[0].affected_ts == ts2
+
+
+def test_check_price_jumps_sorts_unordered_bars() -> None:
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 2, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=ts2, close=Decimal("125")),
+        _make_bar(ts=ts1, close=Decimal("100")),
+    ]
+
+    results = check_price_jumps(bars)
+
+    assert len(results) == 1
+    assert results[0].affected_ts == ts2
+
+
+def test_check_price_jumps_flags_multiple_non_contiguous_jumps() -> None:
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 2, tzinfo=UTC)
+    ts3 = datetime(2024, 1, 3, tzinfo=UTC)
+    ts4 = datetime(2024, 1, 4, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=ts1, close=Decimal("100")),
+        _make_bar(ts=ts2, close=Decimal("125")),
+        _make_bar(ts=ts3, close=Decimal("130")),
+        _make_bar(ts=ts4, close=Decimal("100")),
+    ]
+
+    results = check_price_jumps(bars)
+
+    assert len(results) == 2
+    assert results[0].affected_ts == ts2
+    assert results[1].affected_ts == ts4
