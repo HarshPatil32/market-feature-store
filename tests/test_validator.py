@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +15,7 @@ from backend.validation.validator import (
     check_duplicate_bars,
     check_empty_response,
     check_high_lt_low,
+    check_incomplete_backfill_range,
     check_missing_timestamps,
     check_negative_prices,
     check_open_close_outside_range,
@@ -1060,3 +1062,217 @@ def test_check_empty_response_omits_range_when_only_end_provided() -> None:
     message = result.message or ""
     assert "between" not in message
     assert end.isoformat() not in message
+
+
+def test_check_incomplete_backfill_range_returns_none_for_empty_bars() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 31, tzinfo=UTC)
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1d", [], start=start, end=end) is None
+    )
+
+
+def test_check_incomplete_backfill_range_returns_none_when_range_fully_covered() -> (
+    None
+):
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 3, tzinfo=UTC)),
+    ]
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+        is None
+    )
+
+
+def test_check_incomplete_backfill_range_tolerates_weekend_at_start() -> None:
+    start = datetime(2024, 1, 6, tzinfo=UTC)  # Saturday
+    end = datetime(2024, 1, 10, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 8, tzinfo=UTC)),  # Monday
+        _make_bar(ts=datetime(2024, 1, 9, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 10, tzinfo=UTC)),
+    ]
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+        is None
+    )
+
+
+def test_check_incomplete_backfill_range_tolerates_weekend_at_end() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 7, tzinfo=UTC)  # Sunday
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 3, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 4, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 5, tzinfo=UTC)),  # Friday
+    ]
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+        is None
+    )
+
+
+def test_check_incomplete_backfill_range_ignores_time_of_day_on_same_calendar_date() -> (
+    None
+):
+    start = datetime(2024, 1, 1, 9, tzinfo=UTC)
+    end = datetime(2024, 1, 1, 16, tzinfo=UTC)
+    bars = [_make_bar(ts=datetime(2024, 1, 1, 9, 30, tzinfo=UTC))]
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+        is None
+    )
+
+
+def test_check_incomplete_backfill_range_flags_late_start() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)  # Monday
+    end = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC)),  # Tuesday
+        _make_bar(ts=datetime(2024, 1, 3, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 4, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 5, tzinfo=UTC)),
+    ]
+
+    result = check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+
+    assert result is not None
+    assert result.symbol == "AAPL"
+    assert result.check == "incomplete_backfill_range"
+    assert result.severity == CheckSeverity.warning
+    assert result.affected_ts == start
+    message = result.message or ""
+    assert "1 expected trading day" in message
+    assert "at start" in message
+
+
+def test_check_incomplete_backfill_range_flags_multi_day_late_start() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)  # Monday
+    end = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 4, tzinfo=UTC)),  # Thursday
+        _make_bar(ts=datetime(2024, 1, 5, tzinfo=UTC)),
+    ]
+
+    result = check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+
+    assert result is not None
+    assert result.check == "incomplete_backfill_range"
+    assert result.affected_ts == start
+    message = result.message or ""
+    assert "3 expected trading day" in message
+    assert "at start" in message
+
+
+def test_check_incomplete_backfill_range_normalizes_non_utc_bounds() -> None:
+    eastern = ZoneInfo("America/New_York")
+    start = datetime(2024, 1, 1, tzinfo=eastern)
+    end = datetime(2024, 1, 5, tzinfo=eastern)
+    bars = [_make_bar(ts=datetime(2024, 1, 2, 5, tzinfo=UTC))]
+
+    result = check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+
+    assert result is not None
+    assert result.affected_ts == datetime(2024, 1, 1, tzinfo=UTC)
+    assert result.affected_ts.tzinfo == UTC
+
+
+def test_check_incomplete_backfill_range_returns_none_when_start_after_end() -> None:
+    start = datetime(2024, 1, 5, tzinfo=UTC)
+    end = datetime(2024, 1, 1, tzinfo=UTC)
+    bars = [_make_bar(ts=datetime(2024, 1, 3, tzinfo=UTC))]
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+        is None
+    )
+
+
+def test_check_incomplete_backfill_range_flags_early_end() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 5, tzinfo=UTC)  # Friday
+    friday = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 2, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 3, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 4, tzinfo=UTC)),  # Thursday
+    ]
+
+    result = check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+
+    assert result is not None
+    assert result.check == "incomplete_backfill_range"
+    assert result.severity == CheckSeverity.warning
+    assert result.affected_ts == friday
+    message = result.message or ""
+    assert "1 expected trading day" in message
+    assert "at end" in message
+
+
+def test_check_incomplete_backfill_range_flags_both_edges() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [_make_bar(ts=datetime(2024, 1, 3, tzinfo=UTC))]
+
+    result = check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+
+    assert result is not None
+    assert result.check == "incomplete_backfill_range"
+    assert result.affected_ts == start
+    message = result.message or ""
+    assert "at start" in message
+    assert "at end" in message
+
+
+def test_check_incomplete_backfill_range_sorts_unordered_bars() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [
+        _make_bar(ts=datetime(2024, 1, 5, tzinfo=UTC)),
+        _make_bar(ts=datetime(2024, 1, 1, tzinfo=UTC)),
+    ]
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1d", bars, start=start, end=end)
+        is None
+    )
+
+
+def test_check_incomplete_backfill_range_applies_to_intraday_timeframe() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [
+        _make_bar(
+            ts=datetime(2024, 1, 3, tzinfo=UTC),
+            timeframe="1h",
+        ),
+    ]
+
+    result = check_incomplete_backfill_range("AAPL", "1h", bars, start=start, end=end)
+
+    assert result is not None
+    assert result.check == "incomplete_backfill_range"
+    assert result.affected_ts == start
+
+
+def test_check_incomplete_backfill_range_skips_unknown_timeframe() -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 5, tzinfo=UTC)
+    bars = [_make_bar(ts=datetime(2024, 1, 3, tzinfo=UTC), timeframe="1wk")]
+
+    assert (
+        check_incomplete_backfill_range("AAPL", "1wk", bars, start=start, end=end)
+        is None
+    )

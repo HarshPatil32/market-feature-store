@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -391,10 +391,60 @@ def check_empty_response(
     )
 
 
+def check_incomplete_backfill_range(
+    symbol: Ticker,
+    timeframe: str,
+    bars: Sequence[Bar],
+    *,
+    start: AwareDatetime,
+    end: AwareDatetime,
+) -> QualityCheckResult | None:
+    """Detect when received bars fall short of the requested [start, end] edges."""
+    if not bars:
+        return None
+    if timeframe != _DAILY_TIMEFRAME and timeframe not in _INTRADAY_STEPS:
+        return None
+
+    start = start.astimezone(UTC)
+    end = end.astimezone(UTC)
+    if start > end:
+        return None
+
+    ordered = sorted(bars, key=lambda bar: bar.ts)
+    first_ts, last_ts = ordered[0].ts, ordered[-1].ts
+
+    # _missing_weekdays is exclusive on both ends; shift by one day to make
+    # start/end inclusive in the boundary check.
+    missing_leading = _missing_weekdays(start - timedelta(days=1), first_ts)
+    missing_trailing = _missing_weekdays(last_ts, end + timedelta(days=1))
+    if not missing_leading and not missing_trailing:
+        return None
+
+    parts: list[str] = []
+    if missing_leading:
+        parts.append(
+            f"missing {len(missing_leading)} expected trading day(s) at start "
+            f"(received data starts {first_ts.isoformat()}, requested from {start.isoformat()})"
+        )
+    if missing_trailing:
+        parts.append(
+            f"missing {len(missing_trailing)} expected trading day(s) at end "
+            f"(received data ends {last_ts.isoformat()}, requested through {end.isoformat()})"
+        )
+
+    return QualityCheckResult(
+        symbol=symbol,
+        check="incomplete_backfill_range",
+        severity=CheckSeverity.warning,
+        message=f"Incomplete backfill for {timeframe}: {'; '.join(parts)}",
+        affected_ts=missing_leading[0] if missing_leading else missing_trailing[0],
+    )
+
+
 # check_duplicate_bars is async and DB-backed; check_missing_timestamps,
-# check_price_jumps, check_stale_symbol, and check_empty_response operate
-# outside DEFAULT_CHECKS. The batch checks and contextual checks must be
-# invoked separately.
+# check_price_jumps, check_stale_symbol, check_empty_response, and
+# check_incomplete_backfill_range operate outside DEFAULT_CHECKS. The batch
+# checks and contextual checks must be invoked separately.
 DEFAULT_CHECKS: tuple[CheckFn, ...] = (
     check_high_lt_low,
     check_open_close_outside_range,
