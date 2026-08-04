@@ -1,14 +1,14 @@
 """Reprocess stored raw market data through normalize/validate."""
 
 import inspect
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.bar import Bar
+from backend.bar import Bar, bars_from_normalize_result
 from backend.services.raw_market_data import load_response_payload
 from backend.storage.models import IngestionRun, RunStatus
 from backend.storage.repository import (
@@ -25,17 +25,6 @@ logger = structlog.get_logger(__name__)
 def _ensure_sync_callable(name: str, fn: Callable[..., object]) -> None:
     if inspect.iscoroutinefunction(fn):
         raise TypeError(f"{name} must be a synchronous callable")
-
-
-def _bars_from_normalize(result: object) -> list[Bar]:
-    if isinstance(result, Bar):
-        return [result]
-    if isinstance(result, Iterable) and not isinstance(result, (str, bytes)):
-        bars = list(result)
-        if any(not isinstance(bar, Bar) for bar in bars):
-            raise TypeError("normalize must return Bar instances")
-        return bars
-    raise TypeError("normalize must return a Bar or iterable of Bar")
 
 
 async def reprocess_from_raw(
@@ -85,7 +74,7 @@ async def reprocess_from_raw(
 
         try:
             async with session.begin_nested():
-                bars = _bars_from_normalize(normalize(payload))
+                bars = bars_from_normalize_result(normalize(payload))
                 for bar in bars:
                     await bar_repo.upsert(
                         symbol_id=symbol_id,
