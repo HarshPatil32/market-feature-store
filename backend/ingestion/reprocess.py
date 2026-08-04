@@ -1,14 +1,14 @@
 """Reprocess stored raw market data through normalize/validate."""
 
 import inspect
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.bar import Bar
+from backend.bar import Bar, bars_from_normalize_result
 from backend.services.raw_market_data import load_response_payload
 from backend.storage.models import IngestionRun, RunStatus
 from backend.storage.repository import (
@@ -17,6 +17,7 @@ from backend.storage.repository import (
     MarketBarRepository,
     RawMarketDataRepository,
 )
+from backend.validation.validator import QualityCheckResult
 
 logger = structlog.get_logger(__name__)
 
@@ -26,23 +27,12 @@ def _ensure_sync_callable(name: str, fn: Callable[..., object]) -> None:
         raise TypeError(f"{name} must be a synchronous callable")
 
 
-def _bars_from_normalize(result: object) -> list[Bar]:
-    if isinstance(result, Bar):
-        return [result]
-    if isinstance(result, Iterable) and not isinstance(result, (str, bytes)):
-        bars = list(result)
-        if any(not isinstance(bar, Bar) for bar in bars):
-            raise TypeError("normalize must return Bar instances")
-        return bars
-    raise TypeError("normalize must return a Bar or iterable of Bar")
-
-
 async def reprocess_from_raw(
     session: AsyncSession,
     *,
     symbol_id: int,
     normalize: Callable[[dict[str, Any]], object],
-    validate: Callable[[Sequence[Bar]], Sequence[dict[str, Any]]] | None = None,
+    validate: Callable[[Sequence[Bar]], Sequence[QualityCheckResult]] | None = None,
     run_id: int | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
@@ -84,7 +74,7 @@ async def reprocess_from_raw(
 
         try:
             async with session.begin_nested():
-                bars = _bars_from_normalize(normalize(payload))
+                bars = bars_from_normalize_result(normalize(payload))
                 for bar in bars:
                     await bar_repo.upsert(
                         symbol_id=symbol_id,
@@ -98,13 +88,12 @@ async def reprocess_from_raw(
                     )
 
                 if validate is not None:
-                    for check in validate(bars):
+                    for result in validate(bars):
                         staged_checks.append(
-                            {
-                                **check,
-                                "run_id": run.id,
-                                "symbol_id": symbol_id,
-                            }
+                            result.to_check_row(
+                                run_id=run.id,
+                                symbol_id=symbol_id,
+                            )
                         )
             inserted += len(bars)
         except Exception:

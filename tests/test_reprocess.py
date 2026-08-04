@@ -20,6 +20,7 @@ from backend.storage.repository import (
     MarketBarRepository,
 )
 from backend.storage.schemas import SymbolCreate
+from backend.validation.validator import QualityCheckResult, run_checks
 
 
 def _make_bar(
@@ -201,13 +202,14 @@ async def test_reprocess_validate_creates_new_quality_checks(
     def normalize(_payload: dict[str, object]) -> list[Bar]:
         return [_make_bar(symbol="AAPL")]
 
-    def validate(_bars: Sequence[Bar]) -> list[dict[str, Any]]:
+    def validate(_bars: Sequence[Bar]) -> list[QualityCheckResult]:
         return [
-            {
-                "check_name": "negative_prices",
-                "severity": CheckSeverity.error,
-                "message": "found during reprocess",
-            }
+            QualityCheckResult(
+                symbol="AAPL",
+                check="negative_prices",
+                severity=CheckSeverity.error,
+                message="found during reprocess",
+            )
         ]
 
     result = await reprocess_from_raw(
@@ -226,6 +228,46 @@ async def test_reprocess_validate_creates_new_quality_checks(
     assert reprocess_checks[0].message == "found during reprocess"
     assert len(original_checks) == 1
     assert original_checks[0].check_name == "old_check"
+
+
+@pytest.mark.asyncio
+async def test_reprocess_run_checks_persists_high_lt_low(
+    db_session: AsyncSession,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    run = await trigger_backfill(db_session, "AAPL")
+    await _seed_raw_row(db_session, symbol_id=symbol.id, run_id=run.id)
+
+    def normalize(_payload: dict[str, object]) -> list[Bar]:
+        return [
+            _make_bar(symbol="AAPL", close=Decimal("103")),
+            Bar(
+                symbol="AAPL",
+                ts=datetime(2024, 1, 3, tzinfo=UTC),
+                timeframe="1d",
+                open=Decimal("100"),
+                high=Decimal("98"),
+                low=Decimal("99"),
+                close=Decimal("97"),
+                volume=Decimal("1000"),
+                source="fake",
+            ),
+        ]
+
+    result = await reprocess_from_raw(
+        db_session,
+        symbol_id=symbol.id,
+        normalize=normalize,
+        validate=run_checks,
+    )
+
+    checks = await DataQualityCheckRepository(db_session).list_by_run(result.id)
+    high_lt_low_checks = [c for c in checks if c.check_name == "high_lt_low"]
+
+    assert len(high_lt_low_checks) == 1
+    assert high_lt_low_checks[0].severity == CheckSeverity.error
+    assert high_lt_low_checks[0].symbol_id == symbol.id
+    assert high_lt_low_checks[0].affected_timestamp == datetime(2024, 1, 3, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -341,7 +383,7 @@ async def test_reprocess_validate_failure_does_not_count_inserted_bars(
     def normalize(_payload: dict[str, object]) -> list[Bar]:
         return [_make_bar(symbol="AAPL")]
 
-    def validate(_bars: Sequence[Bar]) -> list[dict[str, Any]]:
+    def validate(_bars: Sequence[Bar]) -> list[QualityCheckResult]:
         raise ValueError("validation failed")
 
     result = await reprocess_from_raw(

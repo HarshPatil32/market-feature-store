@@ -1,5 +1,6 @@
 """Standard internal bar format shared across the pipeline."""
 
+from collections.abc import Iterable
 from datetime import UTC
 from decimal import Decimal
 from typing import Annotated
@@ -71,3 +72,14 @@ class Bar(BaseModel):
         if value < 0:
             raise ValueError("volume must be non-negative")
         return value
+
+
+def bars_from_normalize_result(result: object) -> list[Bar]:
+    if isinstance(result, Bar):
+        return [result]
+    if isinstance(result, Iterable) and not isinstance(result, (str, bytes)):
+        bars = list(result)
+        if any(not isinstance(bar, Bar) for bar in bars):
+            raise TypeError("normalize must return Bar instances")
+        return bars
+    raise TypeError("normalize must return a Bar or iterable of Bar")
