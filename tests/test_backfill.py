@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.bar import Bar
 from backend.ingestion.backfill import backfill_symbol
+from backend.ingestion.chunking import chunk_date_range
 from backend.providers.base import MarketDataProvider, ProviderError
 from backend.providers.fake import FakeProvider
 from backend.services.symbols import SymbolNotFoundError, add_symbol
@@ -64,6 +65,34 @@ class _FailingProvider(MarketDataProvider):
         end: AwareDatetime,
     ) -> Sequence[Bar]:
         raise ProviderError("provider unavailable")
+
+    async def fetch_latest_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        limit: int = 1,
+    ) -> Sequence[Bar]:
+        return []
+
+
+class _PartialFailProvider(MarketDataProvider):
+    def __init__(self, inner: FakeProvider) -> None:
+        self._inner = inner
+        self._calls = 0
+
+    async def fetch_historical_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        start: AwareDatetime,
+        end: AwareDatetime,
+    ) -> Sequence[Bar]:
+        self._calls += 1
+        if self._calls == 1:
+            return await self._inner.fetch_historical_bars(
+                symbol, timeframe, start, end
+            )
+        raise ProviderError("chunk failed")
 
     async def fetch_latest_bars(
         self,
@@ -251,6 +280,133 @@ async def test_backfill_pipeline_failure_marks_run_failed_without_upserting(
     assert run.error_message == "validate boom"
     assert run.finished_at is not None
     assert bars == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_multi_chunk_fetches_and_persists_all_bars(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 15, tzinfo=UTC)
+    expected_bars = await fake_provider.fetch_historical_bars(
+        "AAPL",
+        "1m",
+        start,
+        end,
+    )
+    chunks = chunk_date_range(start, end, "1m")
+
+    result = await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1m",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+
+    bars = await MarketBarRepository(db_session).list_by_symbol(
+        symbol.id,
+        timeframe="1m",
+        start=start,
+        end=end,
+    )
+    raw_rows = await RawMarketDataRepository(db_session).list_by_symbol(
+        symbol.id,
+        run_id=result.id,
+    )
+    timestamps = [bar.timestamp for bar in bars]
+
+    assert result.status == RunStatus.succeeded
+    assert result.fetched == len(expected_bars)
+    assert result.inserted == len(expected_bars)
+    assert len(bars) == len(expected_bars)
+    assert len(set(timestamps)) == len(timestamps)
+    assert len(raw_rows) == len(chunks)
+
+
+@pytest.mark.asyncio
+async def test_backfill_partial_chunk_failure_keeps_prior_bars(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 15, tzinfo=UTC)
+    chunks = chunk_date_range(start, end, "1m")
+    first_chunk_bars = await fake_provider.fetch_historical_bars(
+        "AAPL",
+        "1m",
+        chunks[0][0],
+        chunks[0][1],
+    )
+
+    with pytest.raises(ProviderError, match="chunk failed"):
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=end,
+            provider=_PartialFailProvider(fake_provider),
+            source="fake",
+        )
+
+    run = await db_session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.symbol_id == symbol.id)
+        .order_by(IngestionRun.id.desc())
+        .limit(1)
+    )
+    bars = await MarketBarRepository(db_session).list_by_symbol(
+        symbol.id,
+        timeframe="1m",
+        start=chunks[0][0],
+        end=chunks[0][1],
+    )
+
+    assert run is not None
+    assert run.status == RunStatus.failed
+    assert run.fetched == len(first_chunk_bars)
+    assert run.inserted == len(first_chunk_bars)
+    assert len(bars) == len(first_chunk_bars)
+    assert run.error_message is not None
+    assert "chunk" in run.error_message
+    assert "chunk failed" in run.error_message
+
+
+@pytest.mark.asyncio
+async def test_backfill_invalid_range_raises_without_creating_run(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    before = await db_session.scalar(
+        select(func.count())
+        .select_from(IngestionRun)
+        .where(IngestionRun.run_type == "backfill")
+    )
+
+    with pytest.raises(ValueError, match="start must be <= end"):
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1d",
+            start=datetime(2024, 1, 3, tzinfo=UTC),
+            end=datetime(2024, 1, 1, tzinfo=UTC),
+            provider=fake_provider,
+            source="fake",
+        )
+
+    after = await db_session.scalar(
+        select(func.count())
+        .select_from(IngestionRun)
+        .where(IngestionRun.run_type == "backfill")
+    )
+
+    assert before == after
 
 
 @pytest.mark.asyncio
