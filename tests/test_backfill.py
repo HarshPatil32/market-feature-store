@@ -154,26 +154,44 @@ async def test_backfill_is_idempotent(
     symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
     start = datetime(2024, 1, 1, tzinfo=UTC)
     end = datetime(2024, 1, 3, tzinfo=UTC)
+    bar_repo = MarketBarRepository(db_session)
 
-    for _ in range(2):
-        await backfill_symbol(
-            db_session,
-            symbol="AAPL",
-            timeframe="1d",
-            start=start,
-            end=end,
-            provider=fake_provider,
-            source="fake",
-        )
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+    first_bars = await bar_repo.list_by_symbol(
+        symbol.id,
+        timeframe="1d",
+        start=start,
+        end=end,
+    )
+    first_ids = {bar.id for bar in first_bars}
 
-    bars = await MarketBarRepository(db_session).list_by_symbol(
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+    second_bars = await bar_repo.list_by_symbol(
         symbol.id,
         timeframe="1d",
         start=start,
         end=end,
     )
 
-    assert len(bars) == 3
+    assert len(first_bars) == 3
+    assert len(second_bars) == 3
+    assert {bar.id for bar in second_bars} == first_ids
 
 
 @pytest.mark.asyncio
