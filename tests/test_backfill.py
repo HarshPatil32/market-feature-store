@@ -7,22 +7,48 @@ from unittest.mock import patch
 
 import pytest
 from pydantic import AwareDatetime
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from backend.bar import Bar
 from backend.ingestion.backfill import backfill_symbol
 from backend.ingestion.chunking import chunk_date_range
 from backend.providers.base import MarketDataProvider, ProviderError
 from backend.providers.fake import FakeProvider
+from backend.services.ingestion_runs import trigger_incremental
 from backend.services.symbols import SymbolNotFoundError, add_symbol
-from backend.storage.models import CheckSeverity, IngestionRun, RunStatus
+from backend.storage.models import (
+    CheckSeverity,
+    DataQualityCheck,
+    IngestionRun,
+    MarketBar,
+    RawMarketData,
+    RunStatus,
+    Symbol,
+)
 from backend.storage.repository import (
     DataQualityCheckRepository,
+    IngestionRunRepository,
     MarketBarRepository,
     RawMarketDataRepository,
 )
 from backend.storage.schemas import SymbolCreate, Ticker
+
+
+async def _cleanup_committed_symbol(engine: AsyncEngine, symbol_id: int) -> None:
+    async with AsyncSession(engine, expire_on_commit=False) as session:
+        await session.execute(delete(MarketBar).where(MarketBar.symbol_id == symbol_id))
+        await session.execute(
+            delete(DataQualityCheck).where(DataQualityCheck.symbol_id == symbol_id)
+        )
+        await session.execute(
+            delete(RawMarketData).where(RawMarketData.symbol_id == symbol_id)
+        )
+        await session.execute(
+            delete(IngestionRun).where(IngestionRun.symbol_id == symbol_id)
+        )
+        await session.execute(delete(Symbol).where(Symbol.id == symbol_id))
+        await session.commit()
 
 
 class _ZeroVolumeProvider(MarketDataProvider):
@@ -93,6 +119,30 @@ class _PartialFailProvider(MarketDataProvider):
                 symbol, timeframe, start, end
             )
         raise ProviderError("chunk failed")
+
+    async def fetch_latest_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        limit: int = 1,
+    ) -> Sequence[Bar]:
+        return []
+
+
+class _CountingProvider(MarketDataProvider):
+    def __init__(self, inner: FakeProvider) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    async def fetch_historical_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        start: AwareDatetime,
+        end: AwareDatetime,
+    ) -> Sequence[Bar]:
+        self.calls += 1
+        return await self._inner.fetch_historical_bars(symbol, timeframe, start, end)
 
     async def fetch_latest_bars(
         self,
@@ -457,3 +507,225 @@ async def test_backfill_unknown_symbol_raises_without_creating_run(
 
     assert exc_info.value.symbol == "UNKNOWN"
     assert before == after
+
+
+@pytest.mark.asyncio
+async def test_backfill_failure_survives_caller_rollback(
+    engine: AsyncEngine,
+    fake_provider: FakeProvider,
+) -> None:
+    ticker = "DURBL"
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 15, tzinfo=UTC)
+    chunks = chunk_date_range(start, end, "1m")
+    first_chunk_bars = await fake_provider.fetch_historical_bars(
+        ticker,
+        "1m",
+        chunks[0][0],
+        chunks[0][1],
+    )
+    symbol_id: int | None = None
+
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as session:
+            symbol = await add_symbol(session, SymbolCreate(symbol=ticker))
+            symbol_id = symbol.id
+            await session.commit()
+
+            with pytest.raises(ProviderError, match="chunk failed"):
+                await backfill_symbol(
+                    session,
+                    symbol=ticker,
+                    timeframe="1m",
+                    start=start,
+                    end=end,
+                    provider=_PartialFailProvider(fake_provider),
+                    source="fake",
+                )
+            await session.rollback()
+
+        async with AsyncSession(engine, expire_on_commit=False) as verify_session:
+            run = await verify_session.scalar(
+                select(IngestionRun)
+                .where(IngestionRun.symbol_id == symbol_id)
+                .order_by(IngestionRun.id.desc())
+                .limit(1)
+            )
+            bars = await MarketBarRepository(verify_session).list_by_symbol(
+                symbol_id,
+                timeframe="1m",
+                start=chunks[0][0],
+                end=chunks[0][1],
+            )
+
+            assert run is not None
+            assert run.status == RunStatus.failed
+            assert run.fetched == len(first_chunk_bars)
+            assert len(bars) == len(first_chunk_bars)
+    finally:
+        if symbol_id is not None:
+            await _cleanup_committed_symbol(engine, symbol_id)
+
+
+@pytest.mark.asyncio
+async def test_backfill_resume_skips_completed_chunks(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 15, tzinfo=UTC)
+    chunks = chunk_date_range(start, end, "1m")
+    expected_bars = await fake_provider.fetch_historical_bars(
+        "AAPL",
+        "1m",
+        start,
+        end,
+    )
+
+    with pytest.raises(ProviderError, match="chunk failed"):
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=end,
+            provider=_PartialFailProvider(fake_provider),
+            source="fake",
+        )
+
+    failed_run = await db_session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.symbol_id == symbol.id)
+        .order_by(IngestionRun.id.desc())
+        .limit(1)
+    )
+    assert failed_run is not None
+    assert failed_run.status == RunStatus.failed
+
+    raw_before = await RawMarketDataRepository(db_session).list_by_symbol(
+        symbol.id,
+        run_id=failed_run.id,
+    )
+    counting_provider = _CountingProvider(fake_provider)
+
+    result = await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1m",
+        start=start,
+        end=end,
+        provider=counting_provider,
+        source="fake",
+        resume_run_id=failed_run.id,
+    )
+    raw_after = await RawMarketDataRepository(db_session).list_by_symbol(
+        symbol.id,
+        run_id=failed_run.id,
+    )
+    bars = await MarketBarRepository(db_session).list_by_symbol(
+        symbol.id,
+        timeframe="1m",
+        start=start,
+        end=end,
+    )
+
+    assert result.id == failed_run.id
+    assert result.status == RunStatus.succeeded
+    assert result.fetched == len(expected_bars)
+    assert len(bars) == len(expected_bars)
+    assert len(raw_after) == len(chunks)
+    assert len(raw_before) == 1
+    assert counting_provider.calls == len(chunks) - 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_resume_rejects_succeeded_run(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    succeeded_run = await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+    assert succeeded_run.status == RunStatus.succeeded
+
+    with pytest.raises(ValueError, match="already succeeded"):
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=fake_provider,
+            source="fake",
+            resume_run_id=succeeded_run.id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_backfill_resume_accepts_running_run(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    run_repo = IngestionRunRepository(db_session)
+
+    running_run = await run_repo.create(run_type="backfill", symbol_id=symbol.id)
+    await run_repo.update(
+        running_run.id,
+        status=RunStatus.running,
+        started_at=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+    await db_session.commit()
+
+    result = await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+        resume_run_id=running_run.id,
+    )
+
+    assert result.id == running_run.id
+    assert result.status == RunStatus.succeeded
+    assert result.fetched == 3
+    assert result.inserted == 3
+
+
+@pytest.mark.asyncio
+async def test_backfill_resume_rejects_non_backfill_run(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    incremental_run = await trigger_incremental(db_session, "AAPL")
+
+    with pytest.raises(ValueError, match="not a backfill run"):
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=fake_provider,
+            source="fake",
+            resume_run_id=incremental_run.id,
+        )

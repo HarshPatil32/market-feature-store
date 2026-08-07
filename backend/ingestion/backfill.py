@@ -13,9 +13,13 @@ from backend.bar import Bar
 from backend.ingestion.chunking import chunk_date_range
 from backend.ingestion.pipeline import ingest_raw_data
 from backend.providers.base import MarketDataProvider
-from backend.services.ingestion_runs import trigger_backfill
+from backend.services.symbols import get_symbol
 from backend.storage.models import IngestionRun, RunStatus
-from backend.storage.repository import IngestionRunRepository, MarketBarRepository
+from backend.storage.repository import (
+    IngestionRunRepository,
+    MarketBarRepository,
+    RawMarketDataRepository,
+)
 from backend.validation.validator import run_checks
 
 
@@ -27,6 +31,53 @@ def _normalize_bars_payload(payload: dict[str, Any]) -> list[Bar]:
     return [Bar.model_validate(entry) for entry in payload["bars"]]
 
 
+def _chunk_key(
+    ticker: str,
+    timeframe: str,
+    chunk_start: AwareDatetime,
+    chunk_end: AwareDatetime,
+) -> tuple[str, str, str, str]:
+    return (ticker, timeframe, chunk_start.isoformat(), chunk_end.isoformat())
+
+
+def _chunk_key_from_params(params: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (params["symbol"], params["timeframe"], params["start"], params["end"])
+
+
+async def _load_resume_run(
+    session: AsyncSession,
+    *,
+    resume_run_id: int,
+    symbol_id: int,
+) -> IngestionRun:
+    run_repo = IngestionRunRepository(session)
+    run = await run_repo.get_by_id(resume_run_id)
+    if run is None:
+        raise ValueError(f"backfill run {resume_run_id} not found")
+    if run.run_type != "backfill":
+        raise ValueError(f"backfill run {resume_run_id} is not a backfill run")
+    if run.symbol_id != symbol_id:
+        raise ValueError(f"backfill run {resume_run_id} belongs to a different symbol")
+    if run.status == RunStatus.succeeded:
+        raise ValueError(f"backfill run {resume_run_id} already succeeded")
+    return run
+
+
+async def _completed_chunk_keys(
+    session: AsyncSession,
+    *,
+    symbol_id: int,
+    run_id: int,
+) -> set[tuple[str, str, str, str]]:
+    raw_repo = RawMarketDataRepository(session)
+    raw_rows = await raw_repo.list_by_symbol(symbol_id, run_id=run_id)
+    return {
+        _chunk_key_from_params(row.request_params)
+        for row in raw_rows
+        if row.request_params is not None
+    }
+
+
 async def backfill_symbol(
     session: AsyncSession,
     *,
@@ -36,19 +87,38 @@ async def backfill_symbol(
     end: AwareDatetime,
     provider: MarketDataProvider,
     source: str,
+    resume_run_id: int | None = None,
 ) -> IngestionRun:
     """Run a full backfill for one symbol and date range."""
     if start > end:
         raise ValueError("start must be <= end")
 
     ticker = symbol.strip().upper()
-    run = await trigger_backfill(session, ticker)
-    if run.symbol_id is None:
-        raise RuntimeError(f"backfill run {run.id} has no symbol_id")
-    symbol_id = run.symbol_id
+    symbol_row = await get_symbol(session, ticker)
+    symbol_id = symbol_row.id
 
     run_repo = IngestionRunRepository(session)
     bar_repo = MarketBarRepository(session)
+
+    if resume_run_id is None:
+        run = await run_repo.create(run_type="backfill", symbol_id=symbol_id)
+        already_processed: set[tuple[str, str, str, str]] = set()
+        total_fetched = 0
+        total_inserted = 0
+    else:
+        run = await _load_resume_run(
+            session,
+            resume_run_id=resume_run_id,
+            symbol_id=symbol_id,
+        )
+        already_processed = await _completed_chunk_keys(
+            session,
+            symbol_id=symbol_id,
+            run_id=run.id,
+        )
+        total_fetched = run.fetched
+        total_inserted = run.inserted
+
     chunks = chunk_date_range(start, end, timeframe)
     multi_chunk = len(chunks) > 1
     chunk_start, chunk_end = start, end
@@ -56,14 +126,18 @@ async def backfill_symbol(
     await run_repo.update(
         run.id,
         status=RunStatus.running,
-        started_at=datetime.now(tz=UTC),
+        started_at=run.started_at or datetime.now(tz=UTC),
+        error_message=None,
+        finished_at=None,
     )
-
-    total_fetched = 0
-    total_inserted = 0
+    await session.commit()
 
     try:
         for chunk_start, chunk_end in chunks:
+            key = _chunk_key(ticker, timeframe, chunk_start, chunk_end)
+            if key in already_processed:
+                continue
+
             bars = await provider.fetch_historical_bars(
                 ticker, timeframe, chunk_start, chunk_end
             )
@@ -95,7 +169,14 @@ async def backfill_symbol(
                 )
             total_fetched += len(bars)
             total_inserted += len(bars)
+            await run_repo.update(
+                run.id,
+                fetched=total_fetched,
+                inserted=total_inserted,
+            )
+            await session.commit()
     except Exception as exc:
+        await session.rollback()
         error_message = (
             f"chunk {chunk_start.isoformat()}..{chunk_end.isoformat()} failed: {exc}"
             if multi_chunk
@@ -113,9 +194,9 @@ async def backfill_symbol(
             raise RuntimeError(
                 f"backfill run {run.id} disappeared during update"
             ) from exc
+        await session.commit()
         raise
 
-    # Any upsert failure aborts the run, so inserted always equals fetched on success.
     updated = await run_repo.update(
         run.id,
         status=RunStatus.succeeded,
@@ -125,4 +206,5 @@ async def backfill_symbol(
     )
     if updated is None:
         raise RuntimeError(f"backfill run {run.id} disappeared during update")
+    await session.commit()
     return updated

@@ -8,7 +8,9 @@ import pytest
 import pytest_asyncio
 from alembic.command import upgrade
 from alembic.config import Config
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.orm import Session, SessionTransaction
 from testcontainers.postgres import PostgresContainer
 
 from backend.config import get_settings
@@ -101,7 +103,20 @@ def fake_provider() -> FakeProvider:
 async def db_session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     async with engine.connect() as connection:
         transaction = await connection.begin()
+        await connection.begin_nested()
+
         session = AsyncSession(connection, expire_on_commit=False)
+
+        @event.listens_for(session.sync_session, "after_transaction_end")
+        def restart_savepoint(
+            session_sync: Session,
+            trans: SessionTransaction,
+        ) -> None:
+            if connection.in_transaction() and not connection.in_nested_transaction():
+                sync_connection = connection.sync_connection
+                if sync_connection is not None:
+                    sync_connection.begin_nested()
+
         yield session
         await session.close()
         await transaction.rollback()
