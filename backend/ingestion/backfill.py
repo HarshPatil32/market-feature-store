@@ -105,6 +105,7 @@ async def backfill_symbol(
         already_processed: set[tuple[str, str, str, str]] = set()
         total_fetched = 0
         total_inserted = 0
+        total_failed = 0
     else:
         run = await _load_resume_run(
             session,
@@ -118,6 +119,7 @@ async def backfill_symbol(
         )
         total_fetched = run.fetched
         total_inserted = run.inserted
+        total_failed = run.failed
 
     chunks = chunk_date_range(start, end, timeframe)
     multi_chunk = len(chunks) > 1
@@ -177,6 +179,7 @@ async def backfill_symbol(
             await session.commit()
     except Exception as exc:
         await session.rollback()
+        total_failed += 1
         error_message = (
             f"chunk {chunk_start.isoformat()}..{chunk_end.isoformat()} failed: {exc}"
             if multi_chunk
@@ -187,6 +190,7 @@ async def backfill_symbol(
             status=RunStatus.failed,
             fetched=total_fetched,
             inserted=total_inserted,
+            failed=total_failed,
             error_message=error_message,
             finished_at=datetime.now(tz=UTC),
         )
@@ -202,6 +206,7 @@ async def backfill_symbol(
         status=RunStatus.succeeded,
         fetched=total_fetched,
         inserted=total_inserted,
+        failed=total_failed,
         finished_at=datetime.now(tz=UTC),
     )
     if updated is None:
