@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.bar import Bar, bars_from_normalize_result
 from backend.services.raw_market_data import load_response_payload
+from backend.services.symbols import sync_symbol_coverage
 from backend.storage.models import IngestionRun, RunStatus
 from backend.storage.repository import (
     DataQualityCheckRepository,
@@ -113,6 +114,8 @@ async def reprocess_from_raw(
         error_message = None
 
     try:
+        if inserted > 0:
+            await sync_symbol_coverage(session, symbol_id)
         if staged_checks:
             await check_repo.bulk_create(staged_checks)
 

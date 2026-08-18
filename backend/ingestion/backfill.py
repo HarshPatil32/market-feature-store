@@ -13,7 +13,7 @@ from backend.bar import Bar
 from backend.ingestion.chunking import chunk_date_range
 from backend.ingestion.pipeline import ingest_raw_data
 from backend.providers.base import MarketDataProvider
-from backend.services.symbols import get_symbol
+from backend.services.symbols import get_symbol, sync_symbol_coverage
 from backend.storage.models import IngestionRun, RunStatus
 from backend.storage.repository import (
     IngestionRunRepository,
@@ -169,6 +169,8 @@ async def backfill_symbol(
                     close=bar.close,
                     volume=bar.volume,
                 )
+            if bars:
+                await sync_symbol_coverage(session, symbol_id)
             total_fetched += len(bars)
             total_inserted += len(bars)
             await run_repo.update(

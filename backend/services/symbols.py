@@ -1,12 +1,13 @@
 """Symbol registry business logic."""
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.storage.models import Symbol
-from backend.storage.repository import SymbolRepository
+from backend.storage.repository import MarketBarRepository, SymbolRepository
 from backend.storage.schemas import SymbolCreate
 
 
@@ -49,6 +50,19 @@ async def get_symbol(session: AsyncSession, symbol: str) -> Symbol:
     if row is None:
         raise SymbolNotFoundError(ticker)
     return row
+
+
+async def sync_symbol_coverage(session: AsyncSession, symbol_id: int) -> Symbol | None:
+    """Recompute symbol coverage from stored market bars."""
+    bar_repo = MarketBarRepository(session)
+    coverage_start, coverage_end = await bar_repo.get_timestamp_bounds(symbol_id)
+    repo = SymbolRepository(session)
+    return await repo.update_coverage(
+        symbol_id,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        last_ingested_at=datetime.now(tz=UTC),
+    )
 
 
 async def deactivate_symbol(session: AsyncSession, symbol: str) -> Symbol:

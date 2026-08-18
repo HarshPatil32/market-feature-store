@@ -19,6 +19,7 @@ from backend.storage.models import CheckSeverity, IngestionRun, RunStatus
 from backend.storage.repository import (
     DataQualityCheckRepository,
     MarketBarRepository,
+    SymbolRepository,
 )
 from backend.storage.schemas import SymbolCreate
 from backend.validation.validator import QualityCheckResult, run_checks
@@ -92,6 +93,12 @@ async def test_reprocess_upserts_bars_from_stored_raw(db_session: AsyncSession) 
     assert result.failed == 0
     assert len(bars) == 1
     assert bars[0].close == Decimal("103")
+
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start == bars[0].timestamp
+    assert refreshed.coverage_end == bars[0].timestamp
+    assert refreshed.last_ingested_at is not None
 
 
 @pytest.mark.asyncio
@@ -317,6 +324,12 @@ async def test_reprocess_row_failure_does_not_abort_batch(
     assert result.error_message == "1 raw row(s) failed to reprocess"
     assert len(bars) == 1
 
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start == bars[0].timestamp
+    assert refreshed.coverage_end == bars[0].timestamp
+    assert refreshed.last_ingested_at is not None
+
 
 @pytest.mark.asyncio
 async def test_reprocess_all_rows_failing_marks_run_failed(
@@ -341,6 +354,12 @@ async def test_reprocess_all_rows_failing_marks_run_failed(
     assert result.inserted == 0
     assert result.failed == 2
     assert result.error_message == "all 2 raw row(s) failed to reprocess"
+
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start is None
+    assert refreshed.coverage_end is None
+    assert refreshed.last_ingested_at is None
 
 
 @pytest.mark.asyncio

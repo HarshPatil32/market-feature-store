@@ -247,6 +247,61 @@ async def test_get_by_id_returns_none_for_missing_row(db_session: AsyncSession) 
 
 
 @pytest.mark.asyncio
+async def test_get_timestamp_bounds_returns_none_when_no_bars(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    bounds = await bar_repo.get_timestamp_bounds(symbol.id)
+
+    assert bounds == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_get_timestamp_bounds_returns_min_max_across_timeframes(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 3, tzinfo=UTC)
+    ts3 = datetime(2024, 1, 2, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts1))
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts2))
+    await bar_repo.upsert(
+        **_bar_kwargs(symbol_id=symbol.id, timestamp=ts3, timeframe="1h")
+    )
+
+    bounds = await bar_repo.get_timestamp_bounds(symbol.id)
+
+    assert bounds == (ts1, ts2)
+
+
+@pytest.mark.asyncio
+async def test_get_timestamp_bounds_scoped_by_symbol_id(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    aapl = await symbol_repo.create(symbol="AAPL")
+    msft = await symbol_repo.create(symbol="MSFT")
+
+    aapl_ts = datetime(2024, 1, 1, tzinfo=UTC)
+    msft_ts = datetime(2024, 6, 1, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=aapl.id, timestamp=aapl_ts))
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=msft.id, timestamp=msft_ts))
+
+    assert await bar_repo.get_timestamp_bounds(aapl.id) == (aapl_ts, aapl_ts)
+    assert await bar_repo.get_timestamp_bounds(msft.id) == (msft_ts, msft_ts)
+
+
+@pytest.mark.asyncio
 async def test_get_existing_timestamps_returns_matching_timestamps(
     db_session: AsyncSession,
 ) -> None:

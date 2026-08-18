@@ -33,6 +33,7 @@ from backend.storage.repository import (
     IngestionRunRepository,
     MarketBarRepository,
     RawMarketDataRepository,
+    SymbolRepository,
 )
 from backend.storage.schemas import SymbolCreate, Ticker
 
@@ -238,6 +239,12 @@ async def test_backfill_happy_path(
     assert raw_rows[0].run_id == result.id
     assert raw_rows[0].source == "fake"
 
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start == start
+    assert refreshed.coverage_end == end
+    assert refreshed.last_ingested_at is not None
+
 
 @pytest.mark.asyncio
 async def test_backfill_is_idempotent(
@@ -350,6 +357,12 @@ async def test_backfill_provider_failure_marks_run_failed(
     assert run.error_message == "provider unavailable"
     assert run.finished_at is not None
     assert bars == []
+
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start is None
+    assert refreshed.coverage_end is None
+    assert refreshed.last_ingested_at is None
 
 
 @pytest.mark.asyncio
@@ -486,6 +499,13 @@ async def test_backfill_partial_chunk_failure_keeps_prior_bars(
         assert run.error_message is not None
         assert "chunk" in run.error_message
         assert "chunk failed" in run.error_message
+
+        refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+        assert refreshed is not None
+        assert refreshed.last_ingested_at is not None
+        bar_timestamps = {bar.timestamp for bar in bars}
+        assert refreshed.coverage_start == min(bar_timestamps)
+        assert refreshed.coverage_end == max(bar_timestamps)
 
 
 @pytest.mark.asyncio
