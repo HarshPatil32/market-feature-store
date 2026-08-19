@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import func, select, text
@@ -18,6 +19,7 @@ from backend.storage.models import CheckSeverity, IngestionRun, RunStatus
 from backend.storage.repository import (
     DataQualityCheckRepository,
     MarketBarRepository,
+    SymbolRepository,
 )
 from backend.storage.schemas import SymbolCreate
 from backend.validation.validator import QualityCheckResult, run_checks
@@ -91,6 +93,12 @@ async def test_reprocess_upserts_bars_from_stored_raw(db_session: AsyncSession) 
     assert result.failed == 0
     assert len(bars) == 1
     assert bars[0].close == Decimal("103")
+
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start == bars[0].timestamp
+    assert refreshed.coverage_end == bars[0].timestamp
+    assert refreshed.last_ingested_at is not None
 
 
 @pytest.mark.asyncio
@@ -316,6 +324,12 @@ async def test_reprocess_row_failure_does_not_abort_batch(
     assert result.error_message == "1 raw row(s) failed to reprocess"
     assert len(bars) == 1
 
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start == bars[0].timestamp
+    assert refreshed.coverage_end == bars[0].timestamp
+    assert refreshed.last_ingested_at is not None
+
 
 @pytest.mark.asyncio
 async def test_reprocess_all_rows_failing_marks_run_failed(
@@ -340,6 +354,12 @@ async def test_reprocess_all_rows_failing_marks_run_failed(
     assert result.inserted == 0
     assert result.failed == 2
     assert result.error_message == "all 2 raw row(s) failed to reprocess"
+
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert refreshed.coverage_start is None
+    assert refreshed.coverage_end is None
+    assert refreshed.last_ingested_at is None
 
 
 @pytest.mark.asyncio
@@ -402,6 +422,47 @@ async def test_reprocess_validate_failure_does_not_count_inserted_bars(
     assert result.inserted == 0
     assert result.failed == 1
     assert len(bars) == 0
+
+
+@pytest.mark.asyncio
+async def test_reprocess_finalize_failure_marks_run_failed(
+    db_session: AsyncSession,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    source_run = await trigger_backfill(db_session, "AAPL")
+    await _seed_raw_row(db_session, symbol_id=symbol.id, run_id=source_run.id)
+
+    def normalize(_payload: dict[str, object]) -> list[Bar]:
+        return [_make_bar(symbol="AAPL")]
+
+    def validate(_bars: Sequence[Bar]) -> list[QualityCheckResult]:
+        return [
+            QualityCheckResult(
+                symbol="AAPL",
+                check="negative_prices",
+                severity=CheckSeverity.error,
+                message="found during reprocess",
+            )
+        ]
+
+    with patch.object(
+        DataQualityCheckRepository,
+        "bulk_create",
+        side_effect=RuntimeError("bulk create failed"),
+    ):
+        result = await reprocess_from_raw(
+            db_session,
+            symbol_id=symbol.id,
+            normalize=normalize,
+            validate=validate,
+        )
+
+    assert result.status == RunStatus.failed
+    assert result.error_message == "bulk create failed"
+    assert result.fetched == 1
+    assert result.inserted == 1
+    assert result.failed == 0
+    assert result.finished_at is not None
 
 
 @pytest.mark.asyncio

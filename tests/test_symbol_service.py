@@ -1,6 +1,7 @@
 """Tests for symbol registry service logic."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -12,8 +13,9 @@ from backend.services.symbols import (
     deactivate_symbol,
     get_symbol,
     list_symbols,
+    sync_symbol_coverage,
 )
-from backend.storage.repository import SymbolRepository
+from backend.storage.repository import MarketBarRepository, SymbolRepository
 from backend.storage.schemas import SymbolCreate
 
 
@@ -93,6 +95,74 @@ async def test_add_symbol_rejects_duplicate_from_committed_row(
             if row is not None:
                 await SymbolRepository(cleanup_session).delete(row.id)
             await cleanup_session.close()
+
+
+@pytest.mark.asyncio
+async def test_sync_symbol_coverage_sets_bounds_from_stored_bars(
+    db_session: AsyncSession,
+) -> None:
+    created = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    bar_repo = MarketBarRepository(db_session)
+
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 3, tzinfo=UTC)
+    await bar_repo.upsert(
+        symbol_id=created.id,
+        timestamp=ts1,
+        timeframe="1d",
+        open=Decimal("100"),
+        high=Decimal("105"),
+        low=Decimal("99"),
+        close=Decimal("103"),
+        volume=Decimal("1000"),
+    )
+    await bar_repo.upsert(
+        symbol_id=created.id,
+        timestamp=ts2,
+        timeframe="1h",
+        open=Decimal("100"),
+        high=Decimal("105"),
+        low=Decimal("99"),
+        close=Decimal("103"),
+        volume=Decimal("1000"),
+    )
+
+    before = datetime.now(tz=UTC)
+    updated = await sync_symbol_coverage(db_session, created.id)
+    after = datetime.now(tz=UTC)
+
+    assert updated is not None
+    assert updated.coverage_start == ts1
+    assert updated.coverage_end == ts2
+    assert updated.last_ingested_at is not None
+    assert before <= updated.last_ingested_at <= after
+
+
+@pytest.mark.asyncio
+async def test_sync_symbol_coverage_clears_coverage_bounds_when_no_bars(
+    db_session: AsyncSession,
+) -> None:
+    created = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await SymbolRepository(db_session).update_coverage(
+        created.id,
+        coverage_start=datetime(2024, 1, 1, tzinfo=UTC),
+        coverage_end=datetime(2024, 1, 3, tzinfo=UTC),
+        last_ingested_at=datetime(2024, 1, 4, tzinfo=UTC),
+    )
+
+    updated = await sync_symbol_coverage(db_session, created.id)
+
+    assert updated is not None
+    assert updated.coverage_start is None
+    assert updated.coverage_end is None
+    assert updated.last_ingested_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_symbol_coverage_returns_none_for_missing_symbol(
+    db_session: AsyncSession,
+) -> None:
+    assert await sync_symbol_coverage(db_session, 999_999) is None
 
 
 @pytest.mark.asyncio

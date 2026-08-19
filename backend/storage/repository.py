@@ -298,6 +298,17 @@ class MarketBarRepository:
         result = await self._session.execute(stmt)
         return result.scalars().all()
 
+    async def get_timestamp_bounds(
+        self, symbol_id: int
+    ) -> tuple[datetime | None, datetime | None]:
+        result = await self._session.execute(
+            select(func.min(MarketBar.timestamp), func.max(MarketBar.timestamp)).where(
+                MarketBar.symbol_id == symbol_id
+            )
+        )
+        coverage_start, coverage_end = result.one()
+        return coverage_start, coverage_end
+
     async def get_existing_timestamps(
         self,
         symbol_id: int,

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.bar import Bar, bars_from_normalize_result
 from backend.services.raw_market_data import load_response_payload
+from backend.services.symbols import sync_symbol_coverage
 from backend.storage.models import IngestionRun, RunStatus
 from backend.storage.repository import (
     DataQualityCheckRepository,
@@ -100,9 +101,6 @@ async def reprocess_from_raw(
             logger.exception("reprocess_row_failed", raw_id=raw_row.id)
             failed += 1
 
-    if staged_checks:
-        await check_repo.bulk_create(staged_checks)
-
     if inserted > 0:
         status = RunStatus.succeeded
         error_message = (
@@ -115,15 +113,38 @@ async def reprocess_from_raw(
         status = RunStatus.succeeded
         error_message = None
 
-    updated = await run_repo.update(
-        run.id,
-        status=status,
-        fetched=len(raw_rows),
-        inserted=inserted,
-        failed=failed,
-        error_message=error_message,
-        finished_at=datetime.now(tz=UTC),
-    )
+    try:
+        if inserted > 0:
+            await sync_symbol_coverage(session, symbol_id)
+        if staged_checks:
+            await check_repo.bulk_create(staged_checks)
+
+        updated = await run_repo.update(
+            run.id,
+            status=status,
+            fetched=len(raw_rows),
+            inserted=inserted,
+            failed=failed,
+            error_message=error_message,
+            finished_at=datetime.now(tz=UTC),
+        )
+    except Exception as exc:
+        logger.exception("reprocess_finalize_failed", run_id=run.id)
+        updated = await run_repo.update(
+            run.id,
+            status=RunStatus.failed,
+            fetched=len(raw_rows),
+            inserted=inserted,
+            failed=failed,
+            error_message=str(exc),
+            finished_at=datetime.now(tz=UTC),
+        )
+        if updated is None:
+            raise RuntimeError(
+                f"reprocess run {run.id} disappeared during update"
+            ) from exc
+        return updated
+
     if updated is None:
         raise RuntimeError(f"reprocess run {run.id} disappeared during update")
     return updated
