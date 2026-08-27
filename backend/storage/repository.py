@@ -1,11 +1,11 @@
 """Repository layer for persisted market data and features."""
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, TypeGuard, TypeVar
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +69,23 @@ class SymbolRepository:
         stmt = stmt.offset(offset)
         if limit is not None:
             stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
+    async def list_stale(self, threshold: timedelta) -> Sequence[Symbol]:
+        """Return active symbols missing coverage_end or with coverage_end older than threshold."""
+        cutoff = datetime.now(tz=UTC) - threshold
+        stmt = (
+            select(Symbol)
+            .where(
+                Symbol.active.is_(True),
+                or_(
+                    Symbol.coverage_end.is_(None),
+                    Symbol.coverage_end < cutoff,
+                ),
+            )
+            .order_by(Symbol.symbol)
+        )
         result = await self._session.execute(stmt)
         return result.scalars().all()
 
