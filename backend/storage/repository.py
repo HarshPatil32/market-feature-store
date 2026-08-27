@@ -326,6 +326,18 @@ class MarketBarRepository:
         coverage_start, coverage_end = result.one()
         return coverage_start, coverage_end
 
+    async def get_timeframe_coverage(
+        self, symbol_id: int, *, timeframe: str
+    ) -> tuple[datetime | None, datetime | None]:
+        result = await self._session.execute(
+            select(func.min(MarketBar.timestamp), func.max(MarketBar.timestamp)).where(
+                MarketBar.symbol_id == symbol_id,
+                MarketBar.timeframe == timeframe,
+            )
+        )
+        coverage_start, coverage_end = result.one()
+        return coverage_start, coverage_end
+
     async def get_existing_timestamps(
         self,
         symbol_id: int,

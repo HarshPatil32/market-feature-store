@@ -295,6 +295,141 @@ async def test_backfill_is_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_backfill_skip_covered_chunks_makes_no_provider_calls(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+
+    counting_provider = _CountingProvider(fake_provider)
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=counting_provider,
+        source="fake",
+    )
+
+    assert counting_provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_skip_covered_chunks_preserves_bar_count(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    bar_repo = MarketBarRepository(db_session)
+
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+    first_count = len(
+        await bar_repo.list_by_symbol(
+            symbol.id,
+            timeframe="1d",
+            start=start,
+            end=end,
+        )
+    )
+
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+    second_count = len(
+        await bar_repo.list_by_symbol(
+            symbol.id,
+            timeframe="1d",
+            start=start,
+            end=end,
+        )
+    )
+
+    assert first_count == 3
+    assert second_count == first_count
+
+
+@pytest.mark.asyncio
+async def test_backfill_extended_range_fetches_only_new_chunks(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = _FAST_MULTI_CHUNK_START
+    mid = datetime(2024, 1, 2, tzinfo=UTC)
+    end = datetime(2024, 1, 4, tzinfo=UTC)
+
+    with _fast_multi_chunk_window():
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=mid,
+            provider=fake_provider,
+            source="fake",
+        )
+
+        bar_repo = MarketBarRepository(db_session)
+        existing_start, existing_end = await bar_repo.get_timeframe_coverage(
+            symbol.id,
+            timeframe="1m",
+        )
+        assert existing_start is not None
+        assert existing_end is not None
+
+        extended_chunks = chunk_date_range(start, end, "1m")
+        expected_calls = sum(
+            1
+            for chunk_start, chunk_end in extended_chunks
+            if not (chunk_start >= existing_start and chunk_end <= existing_end)
+        )
+
+        counting_provider = _CountingProvider(fake_provider)
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=end,
+            provider=counting_provider,
+            source="fake",
+        )
+
+        assert expected_calls > 0
+        assert counting_provider.calls == expected_calls
+        assert counting_provider.calls < len(extended_chunks)
+
+
+@pytest.mark.asyncio
 async def test_backfill_validation_persists_quality_checks(
     db_session: AsyncSession,
 ) -> None:

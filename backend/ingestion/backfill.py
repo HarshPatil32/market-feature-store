@@ -99,6 +99,9 @@ async def backfill_symbol(
 
     run_repo = IngestionRunRepository(session)
     bar_repo = MarketBarRepository(session)
+    existing_start, existing_end = await bar_repo.get_timeframe_coverage(
+        symbol_id, timeframe=timeframe
+    )
 
     if resume_run_id is None:
         run = await run_repo.create(run_type="backfill", symbol_id=symbol_id)
@@ -138,6 +141,14 @@ async def backfill_symbol(
         for chunk_start, chunk_end in chunks:
             key = _chunk_key(ticker, timeframe, chunk_start, chunk_end)
             if key in already_processed:
+                continue
+            # Skip provider fetch for chunks fully within existing bar coverage.
+            if (
+                existing_start is not None
+                and existing_end is not None
+                and chunk_start >= existing_start
+                and chunk_end <= existing_end
+            ):
                 continue
 
             bars = await provider.fetch_historical_bars(
