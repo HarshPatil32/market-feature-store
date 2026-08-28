@@ -69,6 +69,44 @@ async def test_upsert_inserts_new_row(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_insert_if_not_exists_inserts_new_row(db_session: AsyncSession) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+
+    result = await bar_repo.insert_if_not_exists(
+        **_bar_kwargs(symbol_id=symbol.id, timestamp=ts)
+    )
+
+    assert result is not None
+    assert result.open == Decimal("100.00")
+    assert result.symbol_id == symbol.id
+    assert result.timestamp == ts
+
+
+@pytest.mark.asyncio
+async def test_insert_if_not_exists_skips_existing_row(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts))
+
+    result = await bar_repo.insert_if_not_exists(
+        **_bar_kwargs(symbol_id=symbol.id, timestamp=ts, open_=Decimal("999.00"))
+    )
+
+    assert result is None
+    bars = await bar_repo.list_by_symbol(symbol.id, timeframe="1d")
+    assert len(bars) == 1
+    assert bars[0].open == Decimal("100.00")
+
+
+@pytest.mark.asyncio
 async def test_upsert_on_conflict_updates_existing_row(
     db_session: AsyncSession,
 ) -> None:

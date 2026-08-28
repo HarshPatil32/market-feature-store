@@ -172,6 +172,42 @@ class _PartialFailProvider(MarketDataProvider):
         return []
 
 
+class _DifferentOpenProvider(MarketDataProvider):
+    def __init__(self, inner: MarketDataProvider) -> None:
+        self._inner = inner
+
+    async def fetch_historical_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        start: AwareDatetime,
+        end: AwareDatetime,
+    ) -> Sequence[Bar]:
+        bars = await self._inner.fetch_historical_bars(symbol, timeframe, start, end)
+        return [
+            Bar(
+                symbol=bar.symbol,
+                ts=bar.ts,
+                timeframe=bar.timeframe,
+                open=Decimal("999.00"),
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                source=bar.source,
+            )
+            for bar in bars
+        ]
+
+    async def fetch_latest_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        limit: int = 1,
+    ) -> Sequence[Bar]:
+        return []
+
+
 class _CountingProvider(MarketDataProvider):
     def __init__(self, inner: MarketDataProvider) -> None:
         self._inner = inner
@@ -244,6 +280,109 @@ async def test_backfill_happy_path(
     assert refreshed.coverage_start == start
     assert refreshed.coverage_end == end
     assert refreshed.last_ingested_at is not None
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_overwrite_existing_bars(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    middle = datetime(2024, 1, 2, tzinfo=UTC)
+    bar_repo = MarketBarRepository(db_session)
+
+    bars = await fake_provider.fetch_historical_bars(Ticker("AAPL"), "1d", start, end)
+    middle_bar = next(bar for bar in bars if bar.ts == middle)
+    await bar_repo.upsert(
+        symbol_id=symbol.id,
+        timestamp=middle_bar.ts,
+        timeframe=middle_bar.timeframe,
+        open=middle_bar.open,
+        high=middle_bar.high,
+        low=middle_bar.low,
+        close=middle_bar.close,
+        volume=middle_bar.volume,
+    )
+    await db_session.commit()
+
+    result = await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=_DifferentOpenProvider(fake_provider),
+        source="fake",
+    )
+    stored = {
+        bar.timestamp: bar.open
+        for bar in await bar_repo.list_by_symbol(symbol.id, timeframe="1d")
+    }
+
+    assert stored[middle] == middle_bar.open
+    assert stored[start] == Decimal("999.00")
+    assert stored[end] == Decimal("999.00")
+    assert result.fetched == 3
+    assert result.inserted == 2
+
+
+@pytest.mark.asyncio
+async def test_backfill_skips_coverage_sync_when_no_bars_inserted(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    bar_repo = MarketBarRepository(db_session)
+    symbol_repo = SymbolRepository(db_session)
+    last_ingested_at = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+
+    bars = await fake_provider.fetch_historical_bars(Ticker("AAPL"), "1d", start, end)
+    for bar in bars:
+        await bar_repo.upsert(
+            symbol_id=symbol.id,
+            timestamp=bar.ts,
+            timeframe=bar.timeframe,
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+        )
+    await symbol_repo.update_coverage(
+        symbol.id,
+        coverage_start=start,
+        coverage_end=end,
+        last_ingested_at=last_ingested_at,
+    )
+    await db_session.commit()
+
+    async def _no_coverage(*_args: object, **_kwargs: object) -> tuple[None, None]:
+        return (None, None)
+
+    with patch.object(
+        MarketBarRepository,
+        "get_timeframe_coverage",
+        side_effect=_no_coverage,
+    ):
+        result = await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=fake_provider,
+            source="fake",
+        )
+
+    refreshed = await symbol_repo.get_by_id(symbol.id)
+    assert refreshed is not None
+    assert result.fetched == 3
+    assert result.inserted == 0
+    assert refreshed.last_ingested_at == last_ingested_at
 
 
 @pytest.mark.asyncio

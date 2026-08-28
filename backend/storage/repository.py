@@ -292,6 +292,43 @@ class MarketBarRepository:
         await self._session.refresh(row)
         return row
 
+    async def insert_if_not_exists(
+        self,
+        *,
+        symbol_id: int,
+        timestamp: datetime,
+        timeframe: str,
+        open: Decimal,
+        high: Decimal,
+        low: Decimal,
+        close: Decimal,
+        volume: Decimal,
+    ) -> MarketBar | None:
+        stmt = (
+            pg_insert(MarketBar)
+            .values(
+                symbol_id=symbol_id,
+                timestamp=timestamp,
+                timeframe=timeframe,
+                open=open,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["symbol_id", "timeframe", "timestamp"],
+            )
+            .returning(MarketBar)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
     async def get_by_id(self, market_bar_id: int) -> MarketBar | None:
         return await self._session.get(MarketBar, market_bar_id)
 

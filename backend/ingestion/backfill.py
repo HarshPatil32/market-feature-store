@@ -169,8 +169,9 @@ async def backfill_symbol(
                 normalize=_normalize_bars_payload,
                 validate=run_checks,
             )
+            chunk_inserted = 0
             for bar in bars:
-                await bar_repo.upsert(
+                inserted_bar = await bar_repo.insert_if_not_exists(
                     symbol_id=symbol_id,
                     timestamp=bar.ts,
                     timeframe=bar.timeframe,
@@ -180,10 +181,12 @@ async def backfill_symbol(
                     close=bar.close,
                     volume=bar.volume,
                 )
-            if bars:
+                if inserted_bar is not None:
+                    chunk_inserted += 1
+            if chunk_inserted > 0:
                 await sync_symbol_coverage(session, symbol_id)
             total_fetched += len(bars)
-            total_inserted += len(bars)
+            total_inserted += chunk_inserted
             await run_repo.update(
                 run.id,
                 fetched=total_fetched,
