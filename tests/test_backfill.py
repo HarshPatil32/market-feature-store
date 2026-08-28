@@ -7,13 +7,14 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
+import structlog
 from pydantic import AwareDatetime
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 import backend.ingestion.chunking as chunking_module
 from backend.bar import Bar
-from backend.ingestion.backfill import backfill_symbol
+from backend.ingestion.backfill import backfill_symbol, backfill_symbols
 from backend.ingestion.chunking import chunk_date_range
 from backend.providers.base import MarketDataProvider, ProviderError
 from backend.providers.fake import FakeProvider
@@ -206,6 +207,31 @@ class _DifferentOpenProvider(MarketDataProvider):
         limit: int = 1,
     ) -> Sequence[Bar]:
         return []
+
+
+class _FailingForSymbolProvider(MarketDataProvider):
+    def __init__(self, inner: MarketDataProvider, *, fail_symbol: str) -> None:
+        self._inner = inner
+        self._fail_symbol = fail_symbol
+
+    async def fetch_historical_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        start: AwareDatetime,
+        end: AwareDatetime,
+    ) -> Sequence[Bar]:
+        if symbol == self._fail_symbol:
+            raise ProviderError("provider unavailable")
+        return await self._inner.fetch_historical_bars(symbol, timeframe, start, end)
+
+    async def fetch_latest_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        limit: int = 1,
+    ) -> Sequence[Bar]:
+        return await self._inner.fetch_latest_bars(symbol, timeframe, limit)
 
 
 class _CountingProvider(MarketDataProvider):
@@ -1116,3 +1142,266 @@ async def test_backfill_resume_rejects_non_backfill_run(
             source="fake",
             resume_run_id=incremental_run.id,
         )
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbol_logs_started_and_succeeded(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=fake_provider,
+            source="fake",
+        )
+
+    started = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_started"
+    )
+    succeeded = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_succeeded"
+    )
+
+    assert started["symbol"] == "AAPL"
+    assert started["run_id"] == result.id
+    assert started["timeframe"] == "1d"
+    assert succeeded["symbol"] == "AAPL"
+    assert succeeded["run_id"] == result.id
+    assert succeeded["fetched"] == 3
+    assert succeeded["inserted"] == 3
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbol_logs_failed(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    with structlog.testing.capture_logs() as captured:
+        with pytest.raises(ProviderError, match="provider unavailable"):
+            await backfill_symbol(
+                db_session,
+                symbol="AAPL",
+                timeframe="1d",
+                start=start,
+                end=end,
+                provider=_FailingProvider(),
+                source="fake",
+            )
+
+    failed = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_failed"
+    )
+    started = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_started"
+    )
+
+    assert started["symbol"] == "AAPL"
+    assert failed["symbol"] == "AAPL"
+    assert failed["error"] == "provider unavailable"
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_continues_after_failure(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+
+    results = await backfill_symbols(
+        db_session,
+        symbols=["AAPL", "MSFT"],
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=provider,
+        source="fake",
+    )
+
+    assert isinstance(results["AAPL"], IngestionRun)
+    assert results["AAPL"].status == RunStatus.succeeded
+    assert isinstance(results["MSFT"], ProviderError)
+    assert str(results["MSFT"]) == "provider unavailable"
+
+    msft_symbol = await SymbolRepository(db_session).get_by_symbol("MSFT")
+    assert msft_symbol is not None
+    msft_run = await db_session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.symbol_id == msft_symbol.id)
+        .order_by(IngestionRun.id.desc())
+        .limit(1)
+    )
+    assert msft_run is not None
+    assert msft_run.status == RunStatus.failed
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_all_succeed(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    results = await backfill_symbols(
+        db_session,
+        symbols=["AAPL", "MSFT"],
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+
+    assert all(isinstance(value, IngestionRun) for value in results.values())
+    aapl_result = results["AAPL"]
+    msft_result = results["MSFT"]
+    assert isinstance(aapl_result, IngestionRun)
+    assert isinstance(msft_result, IngestionRun)
+    assert aapl_result.status == RunStatus.succeeded
+    assert msft_result.status == RunStatus.succeeded
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_logs_summary(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+
+    with structlog.testing.capture_logs() as captured:
+        await backfill_symbols(
+            db_session,
+            symbols=["AAPL", "MSFT"],
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=provider,
+            source="fake",
+        )
+
+    summary = next(
+        entry for entry in captured if entry["event"] == "backfill_symbols_done"
+    )
+
+    assert summary["total"] == 2
+    assert summary["succeeded"] == 1
+    assert summary["failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_clears_context_between_symbols(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+    context_at_aapl_start: dict[str, object] = {}
+    real_backfill_symbol = backfill_symbol
+
+    async def tracking_backfill_symbol(
+        session: AsyncSession,
+        *,
+        symbol: str,
+        **kwargs: object,
+    ) -> IngestionRun:
+        if symbol == "AAPL":
+            context_at_aapl_start.update(structlog.contextvars.get_contextvars())
+        return await real_backfill_symbol(session, symbol=symbol, **kwargs)  # type: ignore[arg-type]
+
+    with patch(
+        "backend.ingestion.backfill.backfill_symbol",
+        side_effect=tracking_backfill_symbol,
+    ):
+        results = await backfill_symbols(
+            db_session,
+            symbols=["MSFT", "AAPL"],
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=provider,
+            source="fake",
+        )
+
+    assert isinstance(results["AAPL"], IngestionRun)
+    assert isinstance(results["MSFT"], ProviderError)
+    assert "ingestion_run_id" not in context_at_aapl_start
+    assert "ingestion_run_id" not in structlog.contextvars.get_contextvars()
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_clears_context_when_failure_commit_raises(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+    real_commit = db_session.commit
+    commit_count = 0
+    context_at_aapl_start: dict[str, object] = {}
+    real_backfill_symbol = backfill_symbol
+
+    async def commit_side_effect() -> None:
+        nonlocal commit_count
+        commit_count += 1
+        if commit_count == 2:
+            raise RuntimeError("db down")
+        await real_commit()
+
+    async def tracking_backfill_symbol(
+        session: AsyncSession,
+        *,
+        symbol: str,
+        **kwargs: object,
+    ) -> IngestionRun:
+        if symbol == "AAPL":
+            context_at_aapl_start.update(structlog.contextvars.get_contextvars())
+        return await real_backfill_symbol(session, symbol=symbol, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(db_session, "commit", side_effect=commit_side_effect):
+        with patch(
+            "backend.ingestion.backfill.backfill_symbol",
+            side_effect=tracking_backfill_symbol,
+        ):
+            results = await backfill_symbols(
+                db_session,
+                symbols=["MSFT", "AAPL"],
+                timeframe="1d",
+                start=start,
+                end=end,
+                provider=provider,
+                source="fake",
+            )
+
+    assert isinstance(results["MSFT"], RuntimeError)
+    assert str(results["MSFT"]) == "db down"
+    assert isinstance(results["AAPL"], IngestionRun)
+    assert "ingestion_run_id" not in context_at_aapl_start
+    assert "ingestion_run_id" not in structlog.contextvars.get_contextvars()

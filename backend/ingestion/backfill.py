@@ -6,12 +6,14 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+import structlog
 from pydantic import AwareDatetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.bar import Bar
 from backend.ingestion.chunking import chunk_date_range
 from backend.ingestion.pipeline import ingest_raw_data
+from backend.logging import bind_ingestion_run_id, clear_ingestion_run_id
 from backend.providers.base import MarketDataProvider
 from backend.services.symbols import get_symbol, sync_symbol_coverage
 from backend.storage.models import IngestionRun, RunStatus
@@ -21,6 +23,8 @@ from backend.storage.repository import (
     RawMarketDataRepository,
 )
 from backend.validation.validator import run_checks
+
+logger = structlog.get_logger(__name__)
 
 
 def _bars_payload(bars: Sequence[Bar]) -> dict[str, Any]:
@@ -137,95 +141,154 @@ async def backfill_symbol(
     )
     await session.commit()
 
-    try:
-        for chunk_start, chunk_end in chunks:
-            key = _chunk_key(ticker, timeframe, chunk_start, chunk_end)
-            if key in already_processed:
-                continue
-            # Skip provider fetch for chunks fully within existing bar coverage.
-            if (
-                existing_start is not None
-                and existing_end is not None
-                and chunk_start >= existing_start
-                and chunk_end <= existing_end
-            ):
-                continue
+    bind_ingestion_run_id(str(run.id))
+    logger.info(
+        "backfill_symbol_started",
+        symbol=ticker,
+        run_id=run.id,
+        timeframe=timeframe,
+    )
 
-            bars = await provider.fetch_historical_bars(
-                ticker, timeframe, chunk_start, chunk_end
-            )
-            await ingest_raw_data(
-                session,
-                run_id=run.id,
-                symbol_id=symbol_id,
-                source=source,
-                response_payload=_bars_payload(bars),
-                request_params={
-                    "symbol": ticker,
-                    "timeframe": timeframe,
-                    "start": chunk_start.isoformat(),
-                    "end": chunk_end.isoformat(),
-                },
-                normalize=_normalize_bars_payload,
-                validate=run_checks,
-            )
-            chunk_inserted = 0
-            for bar in bars:
-                inserted_bar = await bar_repo.insert_if_not_exists(
-                    symbol_id=symbol_id,
-                    timestamp=bar.ts,
-                    timeframe=bar.timeframe,
-                    open=bar.open,
-                    high=bar.high,
-                    low=bar.low,
-                    close=bar.close,
-                    volume=bar.volume,
+    try:
+        try:
+            for chunk_start, chunk_end in chunks:
+                key = _chunk_key(ticker, timeframe, chunk_start, chunk_end)
+                if key in already_processed:
+                    continue
+                # Skip provider fetch for chunks fully within existing bar coverage.
+                if (
+                    existing_start is not None
+                    and existing_end is not None
+                    and chunk_start >= existing_start
+                    and chunk_end <= existing_end
+                ):
+                    continue
+
+                bars = await provider.fetch_historical_bars(
+                    ticker, timeframe, chunk_start, chunk_end
                 )
-                if inserted_bar is not None:
-                    chunk_inserted += 1
-            if chunk_inserted > 0:
-                await sync_symbol_coverage(session, symbol_id)
-            total_fetched += len(bars)
-            total_inserted += chunk_inserted
-            await run_repo.update(
+                await ingest_raw_data(
+                    session,
+                    run_id=run.id,
+                    symbol_id=symbol_id,
+                    source=source,
+                    response_payload=_bars_payload(bars),
+                    request_params={
+                        "symbol": ticker,
+                        "timeframe": timeframe,
+                        "start": chunk_start.isoformat(),
+                        "end": chunk_end.isoformat(),
+                    },
+                    normalize=_normalize_bars_payload,
+                    validate=run_checks,
+                )
+                chunk_inserted = 0
+                for bar in bars:
+                    inserted_bar = await bar_repo.insert_if_not_exists(
+                        symbol_id=symbol_id,
+                        timestamp=bar.ts,
+                        timeframe=bar.timeframe,
+                        open=bar.open,
+                        high=bar.high,
+                        low=bar.low,
+                        close=bar.close,
+                        volume=bar.volume,
+                    )
+                    if inserted_bar is not None:
+                        chunk_inserted += 1
+                if chunk_inserted > 0:
+                    await sync_symbol_coverage(session, symbol_id)
+                total_fetched += len(bars)
+                total_inserted += chunk_inserted
+                await run_repo.update(
+                    run.id,
+                    fetched=total_fetched,
+                    inserted=total_inserted,
+                )
+                await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            total_failed += 1
+            error_message = (
+                f"chunk {chunk_start.isoformat()}..{chunk_end.isoformat()} failed: {exc}"
+                if multi_chunk
+                else str(exc)
+            )
+            updated = await run_repo.update(
                 run.id,
+                status=RunStatus.failed,
                 fetched=total_fetched,
                 inserted=total_inserted,
+                failed=total_failed,
+                error_message=error_message,
+                finished_at=datetime.now(tz=UTC),
             )
+            if updated is None:
+                raise RuntimeError(
+                    f"backfill run {run.id} disappeared during update"
+                ) from exc
             await session.commit()
-    except Exception as exc:
-        await session.rollback()
-        total_failed += 1
-        error_message = (
-            f"chunk {chunk_start.isoformat()}..{chunk_end.isoformat()} failed: {exc}"
-            if multi_chunk
-            else str(exc)
-        )
+            logger.error(
+                "backfill_symbol_failed",
+                symbol=ticker,
+                run_id=run.id,
+                error=error_message,
+            )
+            raise
+
         updated = await run_repo.update(
             run.id,
-            status=RunStatus.failed,
+            status=RunStatus.succeeded,
             fetched=total_fetched,
             inserted=total_inserted,
             failed=total_failed,
-            error_message=error_message,
             finished_at=datetime.now(tz=UTC),
         )
         if updated is None:
-            raise RuntimeError(
-                f"backfill run {run.id} disappeared during update"
-            ) from exc
+            raise RuntimeError(f"backfill run {run.id} disappeared during update")
         await session.commit()
-        raise
+        logger.info(
+            "backfill_symbol_succeeded",
+            symbol=ticker,
+            run_id=updated.id,
+            fetched=total_fetched,
+            inserted=total_inserted,
+        )
+        return updated
+    finally:
+        clear_ingestion_run_id()
 
-    updated = await run_repo.update(
-        run.id,
-        status=RunStatus.succeeded,
-        fetched=total_fetched,
-        inserted=total_inserted,
-        failed=total_failed,
-        finished_at=datetime.now(tz=UTC),
+
+async def backfill_symbols(
+    session: AsyncSession,
+    *,
+    symbols: Sequence[str],
+    timeframe: str,
+    start: AwareDatetime,
+    end: AwareDatetime,
+    provider: MarketDataProvider,
+    source: str,
+) -> dict[str, IngestionRun | BaseException]:
+    """Run backfill for each symbol, continuing after individual failures."""
+    results: dict[str, IngestionRun | BaseException] = {}
+    for symbol in symbols:
+        try:
+            results[symbol] = await backfill_symbol(
+                session,
+                symbol=symbol,
+                timeframe=timeframe,
+                start=start,
+                end=end,
+                provider=provider,
+                source=source,
+            )
+        except Exception as exc:
+            results[symbol] = exc
+    succeeded = sum(1 for value in results.values() if isinstance(value, IngestionRun))
+    logger.info(
+        "backfill_symbols_done",
+        total=len(results),
+        succeeded=succeeded,
+        failed=len(results) - succeeded,
     )
-    if updated is None:
-        raise RuntimeError(f"backfill run {run.id} disappeared during update")
-    await session.commit()
-    return updated
+    return results
