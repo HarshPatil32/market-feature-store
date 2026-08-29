@@ -754,6 +754,39 @@ async def test_backfill_multi_chunk_fetches_and_persists_all_bars(
 
 
 @pytest.mark.asyncio
+async def test_backfill_multi_chunk_coverage_reflects_all_bars(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = _FAST_MULTI_CHUNK_START
+    end = _FAST_MULTI_CHUNK_END
+    provider = _fast_multi_chunk_provider(fake_provider)
+    before = datetime.now(tz=UTC)
+
+    with _fast_multi_chunk_window():
+        result = await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=end,
+            provider=provider,
+            source="fake",
+        )
+
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert result.status == RunStatus.succeeded
+    assert refreshed.last_ingested_at is not None
+    assert refreshed.last_ingested_at >= before
+    assert refreshed.coverage_start is not None
+    assert refreshed.coverage_end is not None
+    assert refreshed.coverage_start <= start
+    assert refreshed.coverage_end >= end - timedelta(days=1)
+
+
+@pytest.mark.asyncio
 async def test_backfill_partial_chunk_failure_keeps_prior_bars(
     db_session: AsyncSession,
     fake_provider: FakeProvider,
@@ -806,6 +839,47 @@ async def test_backfill_partial_chunk_failure_keeps_prior_bars(
         bar_timestamps = {bar.timestamp for bar in bars}
         assert refreshed.coverage_start == min(bar_timestamps)
         assert refreshed.coverage_end == max(bar_timestamps)
+
+
+@pytest.mark.asyncio
+async def test_backfill_partial_failure_still_marks_run_failed_when_coverage_sync_raises(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = _FAST_MULTI_CHUNK_START
+    end = _FAST_MULTI_CHUNK_END
+    provider = _PartialFailProvider(_fast_multi_chunk_provider(fake_provider))
+
+    with _fast_multi_chunk_window():
+        with patch(
+            "backend.ingestion.backfill.sync_symbol_coverage",
+            side_effect=RuntimeError("coverage sync down"),
+        ):
+            with pytest.raises(ProviderError, match="chunk failed"):
+                await backfill_symbol(
+                    db_session,
+                    symbol="AAPL",
+                    timeframe="1m",
+                    start=start,
+                    end=end,
+                    provider=provider,
+                    source="fake",
+                )
+
+    run = await db_session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.symbol_id == symbol.id)
+        .order_by(IngestionRun.id.desc())
+        .limit(1)
+    )
+
+    assert run is not None
+    assert run.status == RunStatus.failed
+    assert run.inserted == _FAST_BARS_PER_CHUNK
+    assert run.failed == 1
+    assert run.error_message is not None
+    assert "chunk failed" in run.error_message
 
 
 @pytest.mark.asyncio

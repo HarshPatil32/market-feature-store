@@ -196,8 +196,6 @@ async def backfill_symbol(
                     )
                     if inserted_bar is not None:
                         chunk_inserted += 1
-                if chunk_inserted > 0:
-                    await sync_symbol_coverage(session, symbol_id)
                 total_fetched += len(bars)
                 total_inserted += chunk_inserted
                 await run_repo.update(
@@ -214,6 +212,15 @@ async def backfill_symbol(
                 if multi_chunk
                 else str(exc)
             )
+            if total_inserted > 0:
+                try:
+                    await sync_symbol_coverage(session, symbol_id)
+                except Exception:
+                    logger.exception(
+                        "backfill_symbol_coverage_sync_failed",
+                        symbol=ticker,
+                        run_id=run.id,
+                    )
             updated = await run_repo.update(
                 run.id,
                 status=RunStatus.failed,
@@ -236,6 +243,8 @@ async def backfill_symbol(
             )
             raise
 
+        if total_inserted > 0:
+            await sync_symbol_coverage(session, symbol_id)
         updated = await run_repo.update(
             run.id,
             status=RunStatus.succeeded,
