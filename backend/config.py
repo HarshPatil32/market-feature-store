@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     s3_secret_access_key: SecretStr | None = None
     s3_region: str = "us-east-1"
     raw_payload_s3_threshold_bytes: int = 262_144
+    incremental_schedule: str | None = None
+    incremental_lookback_days: int = Field(default=7, ge=1)
+    incremental_stale_threshold_hours: int = Field(default=24, ge=1)
 
     @property
     def s3_enabled(self) -> bool:
@@ -46,7 +49,12 @@ class Settings(BaseSettings):
             and self.s3_secret_access_key is not None
         )
 
-    @field_validator("s3_bucket", "s3_endpoint_url", mode="before")
+    @field_validator(
+        "s3_bucket",
+        "s3_endpoint_url",
+        "incremental_schedule",
+        mode="before",
+    )
     @classmethod
     def empty_optional_str_to_none(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
