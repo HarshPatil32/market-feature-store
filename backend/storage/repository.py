@@ -1,11 +1,11 @@
 """Repository layer for persisted market data and features."""
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, TypeGuard, TypeVar
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +69,23 @@ class SymbolRepository:
         stmt = stmt.offset(offset)
         if limit is not None:
             stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return result.scalars().all()
+
+    async def list_stale(self, threshold: timedelta) -> Sequence[Symbol]:
+        """Return active symbols missing coverage_end or with coverage_end older than threshold."""
+        cutoff = datetime.now(tz=UTC) - threshold
+        stmt = (
+            select(Symbol)
+            .where(
+                Symbol.active.is_(True),
+                or_(
+                    Symbol.coverage_end.is_(None),
+                    Symbol.coverage_end < cutoff,
+                ),
+            )
+            .order_by(Symbol.symbol)
+        )
         result = await self._session.execute(stmt)
         return result.scalars().all()
 
@@ -275,6 +292,43 @@ class MarketBarRepository:
         await self._session.refresh(row)
         return row
 
+    async def insert_if_not_exists(
+        self,
+        *,
+        symbol_id: int,
+        timestamp: datetime,
+        timeframe: str,
+        open: Decimal,
+        high: Decimal,
+        low: Decimal,
+        close: Decimal,
+        volume: Decimal,
+    ) -> MarketBar | None:
+        stmt = (
+            pg_insert(MarketBar)
+            .values(
+                symbol_id=symbol_id,
+                timestamp=timestamp,
+                timeframe=timeframe,
+                open=open,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["symbol_id", "timeframe", "timestamp"],
+            )
+            .returning(MarketBar)
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        await self._session.flush()
+        await self._session.refresh(row)
+        return row
+
     async def get_by_id(self, market_bar_id: int) -> MarketBar | None:
         return await self._session.get(MarketBar, market_bar_id)
 
@@ -304,6 +358,18 @@ class MarketBarRepository:
         result = await self._session.execute(
             select(func.min(MarketBar.timestamp), func.max(MarketBar.timestamp)).where(
                 MarketBar.symbol_id == symbol_id
+            )
+        )
+        coverage_start, coverage_end = result.one()
+        return coverage_start, coverage_end
+
+    async def get_timeframe_coverage(
+        self, symbol_id: int, *, timeframe: str
+    ) -> tuple[datetime | None, datetime | None]:
+        result = await self._session.execute(
+            select(func.min(MarketBar.timestamp), func.max(MarketBar.timestamp)).where(
+                MarketBar.symbol_id == symbol_id,
+                MarketBar.timeframe == timeframe,
             )
         )
         coverage_start, coverage_end = result.one()

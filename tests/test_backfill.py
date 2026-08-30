@@ -7,13 +7,14 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
+import structlog
 from pydantic import AwareDatetime
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 import backend.ingestion.chunking as chunking_module
 from backend.bar import Bar
-from backend.ingestion.backfill import backfill_symbol
+from backend.ingestion.backfill import backfill_symbol, backfill_symbols
 from backend.ingestion.chunking import chunk_date_range
 from backend.providers.base import MarketDataProvider, ProviderError
 from backend.providers.fake import FakeProvider
@@ -172,6 +173,67 @@ class _PartialFailProvider(MarketDataProvider):
         return []
 
 
+class _DifferentOpenProvider(MarketDataProvider):
+    def __init__(self, inner: MarketDataProvider) -> None:
+        self._inner = inner
+
+    async def fetch_historical_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        start: AwareDatetime,
+        end: AwareDatetime,
+    ) -> Sequence[Bar]:
+        bars = await self._inner.fetch_historical_bars(symbol, timeframe, start, end)
+        return [
+            Bar(
+                symbol=bar.symbol,
+                ts=bar.ts,
+                timeframe=bar.timeframe,
+                open=Decimal("999.00"),
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+                source=bar.source,
+            )
+            for bar in bars
+        ]
+
+    async def fetch_latest_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        limit: int = 1,
+    ) -> Sequence[Bar]:
+        return []
+
+
+class _FailingForSymbolProvider(MarketDataProvider):
+    def __init__(self, inner: MarketDataProvider, *, fail_symbol: str) -> None:
+        self._inner = inner
+        self._fail_symbol = fail_symbol
+
+    async def fetch_historical_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        start: AwareDatetime,
+        end: AwareDatetime,
+    ) -> Sequence[Bar]:
+        if symbol == self._fail_symbol:
+            raise ProviderError("provider unavailable")
+        return await self._inner.fetch_historical_bars(symbol, timeframe, start, end)
+
+    async def fetch_latest_bars(
+        self,
+        symbol: Ticker,
+        timeframe: str,
+        limit: int = 1,
+    ) -> Sequence[Bar]:
+        return await self._inner.fetch_latest_bars(symbol, timeframe, limit)
+
+
 class _CountingProvider(MarketDataProvider):
     def __init__(self, inner: MarketDataProvider) -> None:
         self._inner = inner
@@ -247,6 +309,109 @@ async def test_backfill_happy_path(
 
 
 @pytest.mark.asyncio
+async def test_backfill_does_not_overwrite_existing_bars(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    middle = datetime(2024, 1, 2, tzinfo=UTC)
+    bar_repo = MarketBarRepository(db_session)
+
+    bars = await fake_provider.fetch_historical_bars(Ticker("AAPL"), "1d", start, end)
+    middle_bar = next(bar for bar in bars if bar.ts == middle)
+    await bar_repo.upsert(
+        symbol_id=symbol.id,
+        timestamp=middle_bar.ts,
+        timeframe=middle_bar.timeframe,
+        open=middle_bar.open,
+        high=middle_bar.high,
+        low=middle_bar.low,
+        close=middle_bar.close,
+        volume=middle_bar.volume,
+    )
+    await db_session.commit()
+
+    result = await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=_DifferentOpenProvider(fake_provider),
+        source="fake",
+    )
+    stored = {
+        bar.timestamp: bar.open
+        for bar in await bar_repo.list_by_symbol(symbol.id, timeframe="1d")
+    }
+
+    assert stored[middle] == middle_bar.open
+    assert stored[start] == Decimal("999.00")
+    assert stored[end] == Decimal("999.00")
+    assert result.fetched == 3
+    assert result.inserted == 2
+
+
+@pytest.mark.asyncio
+async def test_backfill_skips_coverage_sync_when_no_bars_inserted(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    bar_repo = MarketBarRepository(db_session)
+    symbol_repo = SymbolRepository(db_session)
+    last_ingested_at = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+
+    bars = await fake_provider.fetch_historical_bars(Ticker("AAPL"), "1d", start, end)
+    for bar in bars:
+        await bar_repo.upsert(
+            symbol_id=symbol.id,
+            timestamp=bar.ts,
+            timeframe=bar.timeframe,
+            open=bar.open,
+            high=bar.high,
+            low=bar.low,
+            close=bar.close,
+            volume=bar.volume,
+        )
+    await symbol_repo.update_coverage(
+        symbol.id,
+        coverage_start=start,
+        coverage_end=end,
+        last_ingested_at=last_ingested_at,
+    )
+    await db_session.commit()
+
+    async def _no_coverage(*_args: object, **_kwargs: object) -> tuple[None, None]:
+        return (None, None)
+
+    with patch.object(
+        MarketBarRepository,
+        "get_timeframe_coverage",
+        side_effect=_no_coverage,
+    ):
+        result = await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=fake_provider,
+            source="fake",
+        )
+
+    refreshed = await symbol_repo.get_by_id(symbol.id)
+    assert refreshed is not None
+    assert result.fetched == 3
+    assert result.inserted == 0
+    assert refreshed.last_ingested_at == last_ingested_at
+
+
+@pytest.mark.asyncio
 async def test_backfill_is_idempotent(
     db_session: AsyncSession,
     fake_provider: FakeProvider,
@@ -292,6 +457,141 @@ async def test_backfill_is_idempotent(
     assert len(first_bars) == 3
     assert len(second_bars) == 3
     assert {bar.id for bar in second_bars} == first_ids
+
+
+@pytest.mark.asyncio
+async def test_backfill_skip_covered_chunks_makes_no_provider_calls(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+
+    counting_provider = _CountingProvider(fake_provider)
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=counting_provider,
+        source="fake",
+    )
+
+    assert counting_provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_skip_covered_chunks_preserves_bar_count(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    bar_repo = MarketBarRepository(db_session)
+
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+    first_count = len(
+        await bar_repo.list_by_symbol(
+            symbol.id,
+            timeframe="1d",
+            start=start,
+            end=end,
+        )
+    )
+
+    await backfill_symbol(
+        db_session,
+        symbol="AAPL",
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+    second_count = len(
+        await bar_repo.list_by_symbol(
+            symbol.id,
+            timeframe="1d",
+            start=start,
+            end=end,
+        )
+    )
+
+    assert first_count == 3
+    assert second_count == first_count
+
+
+@pytest.mark.asyncio
+async def test_backfill_extended_range_fetches_only_new_chunks(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = _FAST_MULTI_CHUNK_START
+    mid = datetime(2024, 1, 2, tzinfo=UTC)
+    end = datetime(2024, 1, 4, tzinfo=UTC)
+
+    with _fast_multi_chunk_window():
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=mid,
+            provider=fake_provider,
+            source="fake",
+        )
+
+        bar_repo = MarketBarRepository(db_session)
+        existing_start, existing_end = await bar_repo.get_timeframe_coverage(
+            symbol.id,
+            timeframe="1m",
+        )
+        assert existing_start is not None
+        assert existing_end is not None
+
+        extended_chunks = chunk_date_range(start, end, "1m")
+        expected_calls = sum(
+            1
+            for chunk_start, chunk_end in extended_chunks
+            if not (chunk_start >= existing_start and chunk_end <= existing_end)
+        )
+
+        counting_provider = _CountingProvider(fake_provider)
+        await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=end,
+            provider=counting_provider,
+            source="fake",
+        )
+
+        assert expected_calls > 0
+        assert counting_provider.calls == expected_calls
+        assert counting_provider.calls < len(extended_chunks)
 
 
 @pytest.mark.asyncio
@@ -454,6 +754,39 @@ async def test_backfill_multi_chunk_fetches_and_persists_all_bars(
 
 
 @pytest.mark.asyncio
+async def test_backfill_multi_chunk_coverage_reflects_all_bars(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = _FAST_MULTI_CHUNK_START
+    end = _FAST_MULTI_CHUNK_END
+    provider = _fast_multi_chunk_provider(fake_provider)
+    before = datetime.now(tz=UTC)
+
+    with _fast_multi_chunk_window():
+        result = await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1m",
+            start=start,
+            end=end,
+            provider=provider,
+            source="fake",
+        )
+
+    refreshed = await SymbolRepository(db_session).get_by_id(symbol.id)
+    assert refreshed is not None
+    assert result.status == RunStatus.succeeded
+    assert refreshed.last_ingested_at is not None
+    assert refreshed.last_ingested_at >= before
+    assert refreshed.coverage_start is not None
+    assert refreshed.coverage_end is not None
+    assert refreshed.coverage_start <= start
+    assert refreshed.coverage_end >= end - timedelta(days=1)
+
+
+@pytest.mark.asyncio
 async def test_backfill_partial_chunk_failure_keeps_prior_bars(
     db_session: AsyncSession,
     fake_provider: FakeProvider,
@@ -506,6 +839,47 @@ async def test_backfill_partial_chunk_failure_keeps_prior_bars(
         bar_timestamps = {bar.timestamp for bar in bars}
         assert refreshed.coverage_start == min(bar_timestamps)
         assert refreshed.coverage_end == max(bar_timestamps)
+
+
+@pytest.mark.asyncio
+async def test_backfill_partial_failure_still_marks_run_failed_when_coverage_sync_raises(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = _FAST_MULTI_CHUNK_START
+    end = _FAST_MULTI_CHUNK_END
+    provider = _PartialFailProvider(_fast_multi_chunk_provider(fake_provider))
+
+    with _fast_multi_chunk_window():
+        with patch(
+            "backend.ingestion.backfill.sync_symbol_coverage",
+            side_effect=RuntimeError("coverage sync down"),
+        ):
+            with pytest.raises(ProviderError, match="chunk failed"):
+                await backfill_symbol(
+                    db_session,
+                    symbol="AAPL",
+                    timeframe="1m",
+                    start=start,
+                    end=end,
+                    provider=provider,
+                    source="fake",
+                )
+
+    run = await db_session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.symbol_id == symbol.id)
+        .order_by(IngestionRun.id.desc())
+        .limit(1)
+    )
+
+    assert run is not None
+    assert run.status == RunStatus.failed
+    assert run.inserted == _FAST_BARS_PER_CHUNK
+    assert run.failed == 1
+    assert run.error_message is not None
+    assert "chunk failed" in run.error_message
 
 
 @pytest.mark.asyncio
@@ -842,3 +1216,266 @@ async def test_backfill_resume_rejects_non_backfill_run(
             source="fake",
             resume_run_id=incremental_run.id,
         )
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbol_logs_started_and_succeeded(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    with structlog.testing.capture_logs() as captured:
+        result = await backfill_symbol(
+            db_session,
+            symbol="AAPL",
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=fake_provider,
+            source="fake",
+        )
+
+    started = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_started"
+    )
+    succeeded = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_succeeded"
+    )
+
+    assert started["symbol"] == "AAPL"
+    assert started["run_id"] == result.id
+    assert started["timeframe"] == "1d"
+    assert succeeded["symbol"] == "AAPL"
+    assert succeeded["run_id"] == result.id
+    assert succeeded["fetched"] == 3
+    assert succeeded["inserted"] == 3
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbol_logs_failed(
+    db_session: AsyncSession,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    with structlog.testing.capture_logs() as captured:
+        with pytest.raises(ProviderError, match="provider unavailable"):
+            await backfill_symbol(
+                db_session,
+                symbol="AAPL",
+                timeframe="1d",
+                start=start,
+                end=end,
+                provider=_FailingProvider(),
+                source="fake",
+            )
+
+    failed = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_failed"
+    )
+    started = next(
+        entry for entry in captured if entry["event"] == "backfill_symbol_started"
+    )
+
+    assert started["symbol"] == "AAPL"
+    assert failed["symbol"] == "AAPL"
+    assert failed["error"] == "provider unavailable"
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_continues_after_failure(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+
+    results = await backfill_symbols(
+        db_session,
+        symbols=["AAPL", "MSFT"],
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=provider,
+        source="fake",
+    )
+
+    assert isinstance(results["AAPL"], IngestionRun)
+    assert results["AAPL"].status == RunStatus.succeeded
+    assert isinstance(results["MSFT"], ProviderError)
+    assert str(results["MSFT"]) == "provider unavailable"
+
+    msft_symbol = await SymbolRepository(db_session).get_by_symbol("MSFT")
+    assert msft_symbol is not None
+    msft_run = await db_session.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.symbol_id == msft_symbol.id)
+        .order_by(IngestionRun.id.desc())
+        .limit(1)
+    )
+    assert msft_run is not None
+    assert msft_run.status == RunStatus.failed
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_all_succeed(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+
+    results = await backfill_symbols(
+        db_session,
+        symbols=["AAPL", "MSFT"],
+        timeframe="1d",
+        start=start,
+        end=end,
+        provider=fake_provider,
+        source="fake",
+    )
+
+    assert all(isinstance(value, IngestionRun) for value in results.values())
+    aapl_result = results["AAPL"]
+    msft_result = results["MSFT"]
+    assert isinstance(aapl_result, IngestionRun)
+    assert isinstance(msft_result, IngestionRun)
+    assert aapl_result.status == RunStatus.succeeded
+    assert msft_result.status == RunStatus.succeeded
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_logs_summary(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+
+    with structlog.testing.capture_logs() as captured:
+        await backfill_symbols(
+            db_session,
+            symbols=["AAPL", "MSFT"],
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=provider,
+            source="fake",
+        )
+
+    summary = next(
+        entry for entry in captured if entry["event"] == "backfill_symbols_done"
+    )
+
+    assert summary["total"] == 2
+    assert summary["succeeded"] == 1
+    assert summary["failed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_clears_context_between_symbols(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+    context_at_aapl_start: dict[str, object] = {}
+    real_backfill_symbol = backfill_symbol
+
+    async def tracking_backfill_symbol(
+        session: AsyncSession,
+        *,
+        symbol: str,
+        **kwargs: object,
+    ) -> IngestionRun:
+        if symbol == "AAPL":
+            context_at_aapl_start.update(structlog.contextvars.get_contextvars())
+        return await real_backfill_symbol(session, symbol=symbol, **kwargs)  # type: ignore[arg-type]
+
+    with patch(
+        "backend.ingestion.backfill.backfill_symbol",
+        side_effect=tracking_backfill_symbol,
+    ):
+        results = await backfill_symbols(
+            db_session,
+            symbols=["MSFT", "AAPL"],
+            timeframe="1d",
+            start=start,
+            end=end,
+            provider=provider,
+            source="fake",
+        )
+
+    assert isinstance(results["AAPL"], IngestionRun)
+    assert isinstance(results["MSFT"], ProviderError)
+    assert "ingestion_run_id" not in context_at_aapl_start
+    assert "ingestion_run_id" not in structlog.contextvars.get_contextvars()
+
+
+@pytest.mark.asyncio
+async def test_backfill_symbols_clears_context_when_failure_commit_raises(
+    db_session: AsyncSession,
+    fake_provider: FakeProvider,
+) -> None:
+    await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = datetime(2024, 1, 3, tzinfo=UTC)
+    provider = _FailingForSymbolProvider(fake_provider, fail_symbol="MSFT")
+    real_commit = db_session.commit
+    commit_count = 0
+    context_at_aapl_start: dict[str, object] = {}
+    real_backfill_symbol = backfill_symbol
+
+    async def commit_side_effect() -> None:
+        nonlocal commit_count
+        commit_count += 1
+        if commit_count == 2:
+            raise RuntimeError("db down")
+        await real_commit()
+
+    async def tracking_backfill_symbol(
+        session: AsyncSession,
+        *,
+        symbol: str,
+        **kwargs: object,
+    ) -> IngestionRun:
+        if symbol == "AAPL":
+            context_at_aapl_start.update(structlog.contextvars.get_contextvars())
+        return await real_backfill_symbol(session, symbol=symbol, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(db_session, "commit", side_effect=commit_side_effect):
+        with patch(
+            "backend.ingestion.backfill.backfill_symbol",
+            side_effect=tracking_backfill_symbol,
+        ):
+            results = await backfill_symbols(
+                db_session,
+                symbols=["MSFT", "AAPL"],
+                timeframe="1d",
+                start=start,
+                end=end,
+                provider=provider,
+                source="fake",
+            )
+
+    assert isinstance(results["MSFT"], RuntimeError)
+    assert str(results["MSFT"]) == "db down"
+    assert isinstance(results["AAPL"], IngestionRun)
+    assert "ingestion_run_id" not in context_at_aapl_start
+    assert "ingestion_run_id" not in structlog.contextvars.get_contextvars()

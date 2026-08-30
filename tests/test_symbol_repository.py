@@ -1,6 +1,6 @@
 """Tests for SymbolRepository CRUD operations."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -236,3 +236,76 @@ async def test_delete_missing_symbol_is_idempotent(
     await repo.delete(999_999)
 
     assert await repo.get_by_id(created.id) is None
+
+
+@pytest.mark.asyncio
+async def test_list_stale_includes_never_ingested_active_symbol(
+    db_session: AsyncSession,
+) -> None:
+    repo = SymbolRepository(db_session)
+    await repo.create(symbol="AAPL")
+
+    stale = await repo.list_stale(timedelta(days=1))
+
+    assert [row.symbol for row in stale] == ["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_list_stale_includes_symbol_with_old_coverage_end(
+    db_session: AsyncSession,
+) -> None:
+    repo = SymbolRepository(db_session)
+    created = await repo.create(symbol="AAPL")
+    await repo.update_coverage(
+        created.id,
+        coverage_end=datetime.now(tz=UTC) - timedelta(days=2),
+    )
+
+    stale = await repo.list_stale(timedelta(days=1))
+
+    assert [row.symbol for row in stale] == ["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_list_stale_excludes_fresh_symbol(
+    db_session: AsyncSession,
+) -> None:
+    repo = SymbolRepository(db_session)
+    created = await repo.create(symbol="AAPL")
+    await repo.update_coverage(
+        created.id,
+        coverage_end=datetime.now(tz=UTC) - timedelta(hours=1),
+    )
+
+    stale = await repo.list_stale(timedelta(days=1))
+
+    assert stale == []
+
+
+@pytest.mark.asyncio
+async def test_list_stale_zero_threshold_treats_any_coverage_end_as_stale(
+    db_session: AsyncSession,
+) -> None:
+    repo = SymbolRepository(db_session)
+    created = await repo.create(symbol="AAPL")
+    await repo.update_coverage(
+        created.id,
+        coverage_end=datetime.now(tz=UTC) - timedelta(seconds=1),
+    )
+
+    stale = await repo.list_stale(timedelta(0))
+
+    assert [row.symbol for row in stale] == ["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_list_stale_excludes_inactive_symbol(
+    db_session: AsyncSession,
+) -> None:
+    repo = SymbolRepository(db_session)
+    created = await repo.create(symbol="AAPL")
+    await repo.set_active(created.id, active=False)
+
+    stale = await repo.list_stale(timedelta(days=1))
+
+    assert stale == []

@@ -35,7 +35,11 @@ Source = Annotated[
 
 Timeframe = Annotated[
     str,
-    StringConstraints(min_length=1, max_length=10),
+    StringConstraints(
+        min_length=1,
+        max_length=10,
+        pattern=r"^[a-zA-Z0-9]+$",
+    ),
 ]
 
 

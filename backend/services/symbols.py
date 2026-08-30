@@ -1,7 +1,7 @@
 """Symbol registry business logic."""
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +41,16 @@ async def list_symbols(
 ) -> Sequence[Symbol]:
     repo = SymbolRepository(session)
     return await repo.list(active_only=active_only, limit=limit, offset=offset)
+
+
+async def detect_stale_symbols(
+    session: AsyncSession,
+    *,
+    threshold: timedelta,
+) -> Sequence[Symbol]:
+    """Return active symbols whose coverage_end is missing or older than threshold."""
+    repo = SymbolRepository(session)
+    return await repo.list_stale(threshold)
 
 
 async def get_symbol(session: AsyncSession, symbol: str) -> Symbol:

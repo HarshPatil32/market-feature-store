@@ -63,3 +63,14 @@ class IngestionRunRead(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class IncrementalRunSummary(BaseModel):
+    succeeded: dict[str, IngestionRunRead] = Field(
+        default_factory=dict,
+        description="Symbols that completed incremental ingestion successfully.",
+    )
+    failed: dict[str, str] = Field(
+        default_factory=dict,
+        description="Symbols that failed, mapped to an error message.",
+    )

@@ -69,6 +69,44 @@ async def test_upsert_inserts_new_row(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_insert_if_not_exists_inserts_new_row(db_session: AsyncSession) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+
+    result = await bar_repo.insert_if_not_exists(
+        **_bar_kwargs(symbol_id=symbol.id, timestamp=ts)
+    )
+
+    assert result is not None
+    assert result.open == Decimal("100.00")
+    assert result.symbol_id == symbol.id
+    assert result.timestamp == ts
+
+
+@pytest.mark.asyncio
+async def test_insert_if_not_exists_skips_existing_row(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+    ts = datetime(2024, 1, 2, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts))
+
+    result = await bar_repo.insert_if_not_exists(
+        **_bar_kwargs(symbol_id=symbol.id, timestamp=ts, open_=Decimal("999.00"))
+    )
+
+    assert result is None
+    bars = await bar_repo.list_by_symbol(symbol.id, timeframe="1d")
+    assert len(bars) == 1
+    assert bars[0].open == Decimal("100.00")
+
+
+@pytest.mark.asyncio
 async def test_upsert_on_conflict_updates_existing_row(
     db_session: AsyncSession,
 ) -> None:
@@ -280,6 +318,66 @@ async def test_get_timestamp_bounds_returns_min_max_across_timeframes(
     bounds = await bar_repo.get_timestamp_bounds(symbol.id)
 
     assert bounds == (ts1, ts2)
+
+
+@pytest.mark.asyncio
+async def test_get_timeframe_coverage_returns_none_when_empty(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    coverage = await bar_repo.get_timeframe_coverage(symbol.id, timeframe="1d")
+
+    assert coverage == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_get_timeframe_coverage_returns_bounds_for_timeframe(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    ts1 = datetime(2024, 1, 1, tzinfo=UTC)
+    ts2 = datetime(2024, 1, 3, tzinfo=UTC)
+    ts3 = datetime(2024, 1, 2, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts1))
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts2))
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=ts3))
+
+    coverage = await bar_repo.get_timeframe_coverage(symbol.id, timeframe="1d")
+
+    assert coverage == (ts1, ts2)
+
+
+@pytest.mark.asyncio
+async def test_get_timeframe_coverage_scoped_by_timeframe(
+    db_session: AsyncSession,
+) -> None:
+    symbol_repo = SymbolRepository(db_session)
+    bar_repo = MarketBarRepository(db_session)
+    symbol = await symbol_repo.create(symbol="AAPL")
+
+    daily_ts = datetime(2024, 1, 1, tzinfo=UTC)
+    hourly_ts = datetime(2024, 6, 1, tzinfo=UTC)
+
+    await bar_repo.upsert(**_bar_kwargs(symbol_id=symbol.id, timestamp=daily_ts))
+    await bar_repo.upsert(
+        **_bar_kwargs(symbol_id=symbol.id, timestamp=hourly_ts, timeframe="1h")
+    )
+
+    assert await bar_repo.get_timeframe_coverage(symbol.id, timeframe="1d") == (
+        daily_ts,
+        daily_ts,
+    )
+    assert await bar_repo.get_timeframe_coverage(symbol.id, timeframe="1h") == (
+        hourly_ts,
+        hourly_ts,
+    )
 
 
 @pytest.mark.asyncio

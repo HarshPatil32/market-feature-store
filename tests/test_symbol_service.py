@@ -1,6 +1,6 @@
 """Tests for symbol registry service logic."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -11,6 +11,7 @@ from backend.services.symbols import (
     SymbolNotFoundError,
     add_symbol,
     deactivate_symbol,
+    detect_stale_symbols,
     get_symbol,
     list_symbols,
     sync_symbol_coverage,
@@ -350,3 +351,20 @@ async def test_deactivate_symbol_preserves_other_fields(
     assert deactivated.symbol == "BTC-USD"
     assert deactivated.asset_type == "crypto"
     assert deactivated.active is False
+
+
+@pytest.mark.asyncio
+async def test_detect_stale_symbols_returns_stale_active_symbols(
+    db_session: AsyncSession,
+) -> None:
+    stale_symbol = await add_symbol(db_session, SymbolCreate(symbol="AAPL"))
+    fresh_symbol = await add_symbol(db_session, SymbolCreate(symbol="MSFT"))
+    await SymbolRepository(db_session).update_coverage(
+        fresh_symbol.id,
+        coverage_end=datetime.now(tz=UTC) - timedelta(hours=1),
+    )
+
+    stale = await detect_stale_symbols(db_session, threshold=timedelta(days=1))
+
+    assert [row.symbol for row in stale] == ["AAPL"]
+    assert stale[0].id == stale_symbol.id
