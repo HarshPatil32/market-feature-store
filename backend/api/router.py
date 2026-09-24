@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,11 @@ from backend.config import get_settings
 from backend.db import get_db_session
 from backend.ingestion.incremental import incremental_symbols
 from backend.providers.factory import get_market_data_provider
+from backend.services.features import (
+    FeatureNotFoundError,
+    get_feature_by_name,
+    list_features,
+)
 from backend.services.ingestion_runs import trigger_backfill, trigger_incremental
 from backend.services.symbols import (
     DuplicateSymbolError,
@@ -22,8 +27,9 @@ from backend.services.symbols import (
     get_symbol,
     list_symbols,
 )
-from backend.storage.models import IngestionRun, Symbol
+from backend.storage.models import FeatureDefinition, IngestionRun, Symbol
 from backend.storage.schemas import (
+    FeatureDefinitionRead,
     IncrementalRunSummary,
     IngestionRunRead,
     SymbolCreate,
@@ -55,6 +61,35 @@ async def create_symbol(
     except DuplicateSymbolError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/features", response_model=list[FeatureDefinitionRead])
+async def get_features(
+    active: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_db_session),
+) -> Sequence[FeatureDefinition]:
+    return await list_features(
+        session,
+        active_only=active,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/features/{name}", response_model=list[FeatureDefinitionRead])
+async def get_features_by_name(
+    name: str = Path(min_length=1, max_length=100),
+    session: AsyncSession = Depends(get_db_session),
+) -> Sequence[FeatureDefinition]:
+    try:
+        return await get_feature_by_name(session, name)
+    except FeatureNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
 

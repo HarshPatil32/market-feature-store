@@ -230,6 +230,8 @@ class FeatureDefinition(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     lookback_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    requirements: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     active: Mapped[bool] = mapped_column(
         nullable=False,
         default=True,

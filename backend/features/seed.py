@@ -16,6 +16,8 @@ class FeatureDefinitionSeedEntry(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     version: int = Field(ge=1)
     lookback_window: int = Field(ge=1)
+    description: str | None = Field(default=None, max_length=255)
+    requirements: list[str] | None = None
 
 
 def _load_seed_entries(path: Path) -> list[FeatureDefinitionSeedEntry]:
@@ -50,6 +52,8 @@ async def seed_feature_definitions(session: AsyncSession, path: Path) -> int:
                     name=entry.name,
                     version=entry.version,
                     lookback_window=entry.lookback_window,
+                    description=entry.description,
+                    requirements=entry.requirements,
                 )
         except IntegrityError:
             # Another process seeded the same (name, version) concurrently.

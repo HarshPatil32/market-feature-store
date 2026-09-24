@@ -1,5 +1,23 @@
 [
-  {"name": "sma_20", "version": 1, "lookback_window": 20},
-  {"name": "rsi_14", "version": 1, "lookback_window": 14},
-  {"name": "ema_50", "version": 1, "lookback_window": 50}
+  {
+    "name": "sma_20",
+    "version": 1,
+    "lookback_window": 20,
+    "description": "Simple moving average over 20 bars",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "rsi_14",
+    "version": 1,
+    "lookback_window": 14,
+    "description": "Relative strength index over 14 bars",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "ema_50",
+    "version": 1,
+    "lookback_window": 50,
+    "description": "Exponential moving average over 50 bars",
+    "requirements": ["lookback_window"]
+  }
 ]
