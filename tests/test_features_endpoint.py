@@ -168,3 +168,81 @@ async def test_get_feature_by_name_rejects_invalid_path(client: AsyncClient) -> 
     response = await client.get(f"/features/{'x' * 101}")
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_active_feature_version_returns_single_version(
+    db_session: AsyncSession,
+    client: AsyncClient,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20)
+
+    response = await client.get("/features/sma_20/active")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "sma_20"
+    assert payload["version"] == 1
+    assert payload["active"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_active_feature_version_returns_highest_active(
+    db_session: AsyncSession,
+    client: AsyncClient,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20)
+    await repo.create(name="sma_20", version=2, lookback_window=20)
+
+    response = await client.get("/features/sma_20/active")
+
+    assert response.status_code == 200
+    assert response.json()["version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_active_feature_version_skips_inactive_higher_version(
+    db_session: AsyncSession,
+    client: AsyncClient,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20)
+    await repo.create(name="sma_20", version=2, lookback_window=20, active=False)
+
+    response = await client.get("/features/sma_20/active")
+
+    assert response.status_code == 200
+    assert response.json()["version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_active_feature_version_all_inactive_returns_404(
+    db_session: AsyncSession,
+    client: AsyncClient,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20, active=False)
+
+    response = await client.get("/features/sma_20/active")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_active_feature_version_unknown_returns_404(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/features/unknown_feat/active")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_active_feature_version_rejects_invalid_path(
+    client: AsyncClient,
+) -> None:
+    response = await client.get(f"/features/{'x' * 101}/active")
+
+    assert response.status_code == 422

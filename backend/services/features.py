@@ -38,3 +38,14 @@ async def get_feature_by_name(
     if not rows:
         raise FeatureNotFoundError(name)
     return rows
+
+
+async def get_active_feature_version(
+    session: AsyncSession,
+    name: str,
+) -> FeatureDefinition:
+    repo = FeatureDefinitionRepository(session)
+    row = await repo.get_active_version(name)
+    if row is None:
+        raise FeatureNotFoundError(name)
+    return row

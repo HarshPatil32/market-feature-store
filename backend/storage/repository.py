@@ -535,6 +535,18 @@ class FeatureDefinitionRepository:
         )
         return result.scalars().all()
 
+    async def get_active_version(self, name: str) -> FeatureDefinition | None:
+        result = await self._session.execute(
+            select(FeatureDefinition)
+            .where(
+                FeatureDefinition.name == name,
+                FeatureDefinition.active.is_(True),
+            )
+            .order_by(FeatureDefinition.version.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def set_active(
         self,
         feature_definition_id: int,

@@ -15,6 +15,7 @@ from backend.ingestion.incremental import incremental_symbols
 from backend.providers.factory import get_market_data_provider
 from backend.services.features import (
     FeatureNotFoundError,
+    get_active_feature_version,
     get_feature_by_name,
     list_features,
 )
@@ -78,6 +79,20 @@ async def get_features(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/features/{name}/active", response_model=FeatureDefinitionRead)
+async def get_active_feature_version_endpoint(
+    name: str = Path(min_length=1, max_length=100),
+    session: AsyncSession = Depends(get_db_session),
+) -> FeatureDefinition:
+    try:
+        return await get_active_feature_version(session, name)
+    except FeatureNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/features/{name}", response_model=list[FeatureDefinitionRead])
