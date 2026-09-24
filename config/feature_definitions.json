@@ -1,0 +1,5 @@
+[
+  {"name": "sma_20", "version": 1, "lookback_window": 20},
+  {"name": "rsi_14", "version": 1, "lookback_window": 14},
+  {"name": "ema_50", "version": 1, "lookback_window": 50}
+]
