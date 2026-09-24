@@ -476,11 +476,15 @@ class FeatureDefinitionRepository:
         version: int,
         lookback_window: int,
         active: bool = True,
+        description: str | None = None,
+        requirements: list[str] | None = None,
     ) -> FeatureDefinition:
         row = FeatureDefinition(
             name=name,
             version=version,
             lookback_window=lookback_window,
+            description=description,
+            requirements=requirements,
             active=active,
         )
         self._session.add(row)
@@ -504,15 +508,44 @@ class FeatureDefinitionRepository:
         )
         return result.scalar_one_or_none()
 
-    async def list(self, *, active_only: bool = False) -> Sequence[FeatureDefinition]:
+    async def list(
+        self,
+        *,
+        active_only: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> Sequence[FeatureDefinition]:
         stmt = select(FeatureDefinition).order_by(
             FeatureDefinition.name,
             FeatureDefinition.version,
         )
         if active_only:
             stmt = stmt.where(FeatureDefinition.active.is_(True))
+        stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         return result.scalars().all()
+
+    async def get_by_name(self, name: str) -> Sequence[FeatureDefinition]:
+        result = await self._session.execute(
+            select(FeatureDefinition)
+            .where(FeatureDefinition.name == name)
+            .order_by(FeatureDefinition.version)
+        )
+        return result.scalars().all()
+
+    async def get_active_version(self, name: str) -> FeatureDefinition | None:
+        result = await self._session.execute(
+            select(FeatureDefinition)
+            .where(
+                FeatureDefinition.name == name,
+                FeatureDefinition.active.is_(True),
+            )
+            .order_by(FeatureDefinition.version.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def set_active(
         self,

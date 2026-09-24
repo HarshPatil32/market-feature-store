@@ -109,6 +109,111 @@ async def test_list_returns_all_ordered_by_name_and_version(
 
 
 @pytest.mark.asyncio
+async def test_create_with_description_and_requirements(
+    db_session: AsyncSession,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+
+    created = await repo.create(
+        name="sma_20",
+        version=1,
+        lookback_window=20,
+        description="Simple moving average",
+        requirements=["lookback_window"],
+    )
+    fetched = await repo.get_by_id(created.id)
+
+    assert fetched is not None
+    assert fetched.description == "Simple moving average"
+    assert fetched.requirements == ["lookback_window"]
+
+
+@pytest.mark.asyncio
+async def test_list_with_limit_and_offset(db_session: AsyncSession) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="a_feat", version=1, lookback_window=1)
+    await repo.create(name="b_feat", version=1, lookback_window=1)
+    await repo.create(name="c_feat", version=1, lookback_window=1)
+
+    page = await repo.list(limit=1, offset=1)
+
+    assert len(page) == 1
+    assert page[0].name == "b_feat"
+
+
+@pytest.mark.asyncio
+async def test_get_by_name_returns_all_versions_ordered(
+    db_session: AsyncSession,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20)
+    await repo.create(name="sma_20", version=2, lookback_window=20)
+
+    rows = await repo.get_by_name("sma_20")
+
+    assert [(row.name, row.version) for row in rows] == [
+        ("sma_20", 1),
+        ("sma_20", 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_by_name_returns_empty_for_unknown_name(
+    db_session: AsyncSession,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+
+    assert await repo.get_by_name("missing") == []
+
+
+@pytest.mark.asyncio
+async def test_get_active_version_returns_highest_active_version(
+    db_session: AsyncSession,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20)
+    await repo.create(name="sma_20", version=2, lookback_window=20)
+
+    row = await repo.get_active_version("sma_20")
+
+    assert row is not None
+    assert row.version == 2
+
+
+@pytest.mark.asyncio
+async def test_get_active_version_ignores_inactive_higher_version(
+    db_session: AsyncSession,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20)
+    await repo.create(name="sma_20", version=2, lookback_window=20, active=False)
+
+    row = await repo.get_active_version("sma_20")
+
+    assert row is not None
+    assert row.version == 1
+
+
+@pytest.mark.asyncio
+async def test_get_active_version_returns_none_when_all_inactive(
+    db_session: AsyncSession,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+    await repo.create(name="sma_20", version=1, lookback_window=20, active=False)
+
+    assert await repo.get_active_version("sma_20") is None
+
+
+@pytest.mark.asyncio
+async def test_get_active_version_returns_none_for_unknown_name(
+    db_session: AsyncSession,
+) -> None:
+    repo = FeatureDefinitionRepository(db_session)
+
+    assert await repo.get_active_version("missing") is None
+
+
+@pytest.mark.asyncio
 async def test_list_active_only_filters_inactive(db_session: AsyncSession) -> None:
     repo = FeatureDefinitionRepository(db_session)
     await repo.create(name="sma_20", version=1, lookback_window=20)

@@ -65,6 +65,20 @@ class IngestionRunRead(BaseModel):
     finished_at: datetime | None
 
 
+class FeatureDefinitionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    version: int
+    lookback_window: int
+    description: str | None
+    requirements: list[str] | None
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class IncrementalRunSummary(BaseModel):
     succeeded: dict[str, IngestionRunRead] = Field(
         default_factory=dict,

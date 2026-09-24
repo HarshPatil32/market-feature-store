@@ -1,6 +1,7 @@
 """Application settings loaded from environment variables and `.env`."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, PostgresDsn, SecretStr, field_validator
@@ -40,6 +41,7 @@ class Settings(BaseSettings):
     incremental_schedule: str | None = None
     incremental_lookback_days: int = Field(default=7, ge=1)
     incremental_stale_threshold_hours: int = Field(default=24, ge=1)
+    feature_definitions_path: Path | None = None
 
     @property
     def s3_enabled(self) -> bool:
@@ -53,6 +55,7 @@ class Settings(BaseSettings):
         "s3_bucket",
         "s3_endpoint_url",
         "incremental_schedule",
+        "feature_definitions_path",
         mode="before",
     )
     @classmethod

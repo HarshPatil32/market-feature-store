@@ -1,6 +1,7 @@
 """Tests for environment-based application settings."""
 
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -127,3 +128,32 @@ def test_blank_provider_name_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_blank_feature_definitions_path_becomes_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", VALID_DB_URL)
+    monkeypatch.setenv("PROVIDER_API_KEY", "test-key")
+    monkeypatch.setenv("PROVIDER_API_SECRET", "test-secret")
+    monkeypatch.setenv("FEATURE_DEFINITIONS_PATH", "   ")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.feature_definitions_path is None
+
+
+def test_feature_definitions_path_loads_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", VALID_DB_URL)
+    monkeypatch.setenv("PROVIDER_API_KEY", "test-key")
+    monkeypatch.setenv("PROVIDER_API_SECRET", "test-secret")
+    monkeypatch.setenv(
+        "FEATURE_DEFINITIONS_PATH",
+        "config/feature_definitions.json",
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.feature_definitions_path == Path("config/feature_definitions.json")
