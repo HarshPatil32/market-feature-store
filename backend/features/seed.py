@@ -3,11 +3,14 @@
 import json
 from pathlib import Path
 
+import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.storage.repository import FeatureDefinitionRepository
+
+logger = structlog.get_logger(__name__)
 
 
 class FeatureDefinitionSeedEntry(BaseModel):
@@ -45,6 +48,12 @@ async def seed_feature_definitions(session: AsyncSession, path: Path) -> int:
     for entry in entries:
         existing = await repo.get_by_name_and_version(entry.name, entry.version)
         if existing is not None:
+            logger.debug(
+                "feature_definition_skipped",
+                name=entry.name,
+                version=entry.version,
+                reason="already_exists",
+            )
             continue
         try:
             async with session.begin_nested():
@@ -56,7 +65,12 @@ async def seed_feature_definitions(session: AsyncSession, path: Path) -> int:
                     requirements=entry.requirements,
                 )
         except IntegrityError:
-            # Another process seeded the same (name, version) concurrently.
+            logger.debug(
+                "feature_definition_skipped",
+                name=entry.name,
+                version=entry.version,
+                reason="concurrent_insert",
+            )
             continue
         inserted += 1
     return inserted

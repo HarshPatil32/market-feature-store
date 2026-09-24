@@ -71,6 +71,7 @@ class FeatureDefinitionRead(BaseModel):
     id: int
     name: str
     version: int
+    lookback_window: int
     description: str | None
     requirements: list[str] | None
     active: bool

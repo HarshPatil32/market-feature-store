@@ -56,6 +56,7 @@ async def test_get_features_returns_seeded_features(
     assert [row["name"] for row in payload] == ["rsi_14", "sma_20"]
     assert payload[0]["description"] == "RSI"
     assert payload[0]["requirements"] == ["lookback_window"]
+    assert payload[0]["lookback_window"] == 14
     assert payload[0]["version"] == 1
     assert payload[0]["active"] is True
 
@@ -153,6 +154,7 @@ async def test_get_feature_by_name_includes_description_and_requirements(
     assert len(payload) == 1
     assert payload[0]["description"] == "Simple moving average"
     assert payload[0]["requirements"] == ["lookback_window"]
+    assert payload[0]["lookback_window"] == 20
 
 
 @pytest.mark.asyncio
@@ -184,6 +186,7 @@ async def test_get_active_feature_version_returns_single_version(
     payload = response.json()
     assert payload["name"] == "sma_20"
     assert payload["version"] == 1
+    assert payload["lookback_window"] == 20
     assert payload["active"] is True
 
 
