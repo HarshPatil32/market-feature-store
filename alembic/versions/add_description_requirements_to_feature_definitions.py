@@ -27,7 +27,9 @@ def upgrade() -> None:
     )
     op.add_column(
         "feature_definitions",
-        sa.Column("requirements", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "requirements", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
     )
 
 
