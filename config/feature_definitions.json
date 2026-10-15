@@ -19,5 +19,26 @@
     "lookback_window": 50,
     "description": "Exponential moving average over 50 bars",
     "requirements": ["lookback_window"]
+  },
+  {
+    "name": "daily_return",
+    "version": 1,
+    "lookback_window": 2,
+    "description": "Simple bar-to-bar return on close",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "log_return",
+    "version": 1,
+    "lookback_window": 2,
+    "description": "Natural log of bar-to-bar close ratio",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "cumulative_return",
+    "version": 1,
+    "lookback_window": 1,
+    "description": "Return vs the first valid close in the frame",
+    "requirements": ["lookback_window"]
   }
 ]
