@@ -40,5 +40,19 @@
     "lookback_window": 1,
     "description": "Return vs the first valid close in the frame",
     "requirements": ["lookback_window"]
+  },
+  {
+    "name": "return_5d",
+    "version": 1,
+    "lookback_window": 6,
+    "description": "Simple return on close over 5 bars",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "return_20d",
+    "version": 1,
+    "lookback_window": 21,
+    "description": "Simple return on close over 20 bars",
+    "requirements": ["lookback_window"]
   }
 ]
