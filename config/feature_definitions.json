@@ -54,5 +54,26 @@
     "lookback_window": 21,
     "description": "Simple return on close over 20 bars",
     "requirements": ["lookback_window"]
+  },
+  {
+    "name": "volatility_5d",
+    "version": 1,
+    "lookback_window": 6,
+    "description": "Rolling 5-bar sample std of daily returns",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "volatility_20d",
+    "version": 1,
+    "lookback_window": 21,
+    "description": "Rolling 20-bar sample std of daily returns",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "volatility_60d",
+    "version": 1,
+    "lookback_window": 61,
+    "description": "Rolling 60-bar sample std of daily returns",
+    "requirements": ["lookback_window"]
   }
 ]
