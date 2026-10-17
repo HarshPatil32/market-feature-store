@@ -72,3 +72,19 @@ class Sma200(Feature):
 
     def _compute(self, frame: pd.DataFrame) -> pd.Series:
         return _sma(frame, self.spec.lookback_window)
+
+
+@register_feature
+class PriceVsSma20(Feature):
+    """Close relative to the 20-bar SMA as a fraction; NaN if close or any window close is invalid."""
+
+    spec = FeatureSpec(
+        name="price_vs_sma_20",
+        version=1,
+        inputs=("close",),
+        lookback_window=20,
+    )
+
+    def _compute(self, frame: pd.DataFrame) -> pd.Series:
+        close = clean_close(frame)
+        return close / _sma(frame, self.spec.lookback_window) - 1

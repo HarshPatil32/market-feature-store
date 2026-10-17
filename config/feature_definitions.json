@@ -96,5 +96,12 @@
     "lookback_window": 61,
     "description": "Rolling 60-bar sample std of daily returns",
     "requirements": ["lookback_window"]
+  },
+  {
+    "name": "price_vs_sma_20",
+    "version": 1,
+    "lookback_window": 20,
+    "description": "Close relative to 20-bar SMA, as a fraction",
+    "requirements": ["lookback_window"]
   }
 ]
