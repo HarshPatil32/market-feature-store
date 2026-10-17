@@ -1,9 +1,30 @@
 [
   {
+    "name": "sma_5",
+    "version": 1,
+    "lookback_window": 5,
+    "description": "Simple moving average over 5 bars",
+    "requirements": ["lookback_window"]
+  },
+  {
     "name": "sma_20",
     "version": 1,
     "lookback_window": 20,
     "description": "Simple moving average over 20 bars",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "sma_50",
+    "version": 1,
+    "lookback_window": 50,
+    "description": "Simple moving average over 50 bars",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "sma_200",
+    "version": 1,
+    "lookback_window": 200,
+    "description": "Simple moving average over 200 bars",
     "requirements": ["lookback_window"]
   },
   {

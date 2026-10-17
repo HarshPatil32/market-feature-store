@@ -9,13 +9,13 @@ from backend.features.base import Feature, FeatureSpec
 from backend.features.registry import register_feature
 
 
-def _clean_close(frame: pd.DataFrame) -> pd.Series:
+def clean_close(frame: pd.DataFrame) -> pd.Series:
     close = frame["close"].astype(float)
     return close.where(np.isfinite(close) & (close > 0))
 
 
 def _rolling_return(frame: pd.DataFrame, periods: int) -> pd.Series:
-    close = _clean_close(frame)
+    close = clean_close(frame)
     return close / close.shift(periods) - 1
 
 
@@ -29,7 +29,7 @@ class DailyReturn(Feature):
     )
 
     def _compute(self, frame: pd.DataFrame) -> pd.Series:
-        close = _clean_close(frame)
+        close = clean_close(frame)
         prev = close.shift(1)
         return close / prev - 1
 
@@ -44,7 +44,7 @@ class LogReturn(Feature):
     )
 
     def _compute(self, frame: pd.DataFrame) -> pd.Series:
-        close = _clean_close(frame)
+        close = clean_close(frame)
         prev = close.shift(1)
         return np.log(close / prev)
 
@@ -87,7 +87,7 @@ class CumulativeReturn(Feature):
     )
 
     def _compute(self, frame: pd.DataFrame) -> pd.Series:
-        close = _clean_close(frame)
+        close = clean_close(frame)
         first_valid = close.first_valid_index()
         if first_valid is None:
             return close
