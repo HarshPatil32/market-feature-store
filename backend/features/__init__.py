@@ -2,3 +2,4 @@
 from backend.features import moving_averages as _moving_averages  # noqa: F401
 from backend.features import returns as _returns  # noqa: F401
 from backend.features import volatility as _volatility  # noqa: F401
+from backend.features import volume as _volume  # noqa: F401

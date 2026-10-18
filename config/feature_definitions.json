@@ -103,5 +103,19 @@
     "lookback_window": 20,
     "description": "Close relative to 20-bar SMA, as a fraction",
     "requirements": ["lookback_window"]
+  },
+  {
+    "name": "volume_sma_20",
+    "version": 1,
+    "lookback_window": 20,
+    "description": "Simple moving average of volume over 20 bars",
+    "requirements": ["lookback_window"]
+  },
+  {
+    "name": "volume_spike_ratio_20",
+    "version": 1,
+    "lookback_window": 20,
+    "description": "Volume divided by its 20-bar simple moving average",
+    "requirements": ["lookback_window"]
   }
 ]
