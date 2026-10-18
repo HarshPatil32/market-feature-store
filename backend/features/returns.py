@@ -76,6 +76,36 @@ class Return20D(Feature):
 
 
 @register_feature
+class Momentum20D(Feature):
+    """Simple close return over 20 bars; 21 bars of history required."""
+
+    spec = FeatureSpec(
+        name="momentum_20d",
+        version=1,
+        inputs=("close",),
+        lookback_window=21,
+    )
+
+    def _compute(self, frame: pd.DataFrame) -> pd.Series:
+        return _rolling_return(frame, 20)
+
+
+@register_feature
+class Momentum60D(Feature):
+    """Simple close return over 60 bars; 61 bars of history required."""
+
+    spec = FeatureSpec(
+        name="momentum_60d",
+        version=1,
+        inputs=("close",),
+        lookback_window=61,
+    )
+
+    def _compute(self, frame: pd.DataFrame) -> pd.Series:
+        return _rolling_return(frame, 60)
+
+
+@register_feature
 class CumulativeReturn(Feature):
     """Return vs the first valid close in the supplied frame (not global history)."""
 
