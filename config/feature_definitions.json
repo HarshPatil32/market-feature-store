@@ -30,8 +30,8 @@
   {
     "name": "rsi_14",
     "version": 1,
-    "lookback_window": 14,
-    "description": "Relative strength index over 14 bars",
+    "lookback_window": 15,
+    "description": "Wilder's relative strength index over 14 bars",
     "requirements": ["lookback_window"]
   },
   {
