@@ -1,6 +1,6 @@
 """Repository layer for persisted market data and features."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, TypeGuard, TypeVar
@@ -567,6 +567,10 @@ class FeatureDefinitionRepository:
             await self._session.flush()
 
 
+# asyncpg limits bind parameters per statement (~32767); 5 columns per feature_values row.
+_UPSERT_MANY_CHUNK_SIZE = 1000
+
+
 class FeatureValueRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -578,17 +582,20 @@ class FeatureValueRepository:
         feature_definition_id: int,
         timestamp: datetime,
         value: Decimal,
+        computed_at: datetime,
     ) -> FeatureValue:
         insert_stmt = pg_insert(FeatureValue).values(
             symbol_id=symbol_id,
             feature_definition_id=feature_definition_id,
             timestamp=timestamp,
             value=value,
+            computed_at=computed_at,
         )
         stmt = insert_stmt.on_conflict_do_update(
             index_elements=["symbol_id", "timestamp", "feature_definition_id"],
             set_={
                 "value": insert_stmt.excluded.value,
+                "computed_at": insert_stmt.excluded.computed_at,
                 "updated_at": func.now(),
             },
         ).returning(FeatureValue)
@@ -597,6 +604,43 @@ class FeatureValueRepository:
         await self._session.flush()
         await self._session.refresh(row)
         return row
+
+    async def upsert_many(
+        self,
+        rows: Sequence[Mapping[str, object]],
+    ) -> int:
+        if not rows:
+            return 0
+        deduped: dict[tuple[int, datetime, int], Mapping[str, object]] = {}
+        for row in rows:
+            ts = row["timestamp"]
+            symbol_id = row["symbol_id"]
+            feature_definition_id = row["feature_definition_id"]
+            if not isinstance(ts, datetime):
+                raise TypeError("timestamp must be datetime")
+            if not isinstance(symbol_id, int):
+                raise TypeError("symbol_id must be int")
+            if not isinstance(feature_definition_id, int):
+                raise TypeError("feature_definition_id must be int")
+            deduped[(symbol_id, ts, feature_definition_id)] = row
+        unique_rows = list(deduped.values())
+
+        for offset in range(0, len(unique_rows), _UPSERT_MANY_CHUNK_SIZE):
+            chunk = unique_rows[offset : offset + _UPSERT_MANY_CHUNK_SIZE]
+            insert_stmt = pg_insert(FeatureValue).values([dict(row) for row in chunk])
+            stmt = insert_stmt.on_conflict_do_update(
+                index_elements=["symbol_id", "timestamp", "feature_definition_id"],
+                set_={
+                    "value": insert_stmt.excluded.value,
+                    "computed_at": insert_stmt.excluded.computed_at,
+                    "updated_at": func.now(),
+                },
+            ).returning(FeatureValue)
+            result = await self._session.execute(stmt)
+            for feature_value in result.scalars().all():
+                await self._session.refresh(feature_value)
+        await self._session.flush()
+        return len(unique_rows)
 
     async def get_by_id(self, feature_value_id: int) -> FeatureValue | None:
         return await self._session.get(FeatureValue, feature_value_id)
