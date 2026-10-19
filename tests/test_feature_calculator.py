@@ -10,12 +10,14 @@ import pandas as pd
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import backend.features  # noqa: F401 — register feature implementations
 from backend.features.calculator import (
     FeatureDefinitionLookbackMismatchError,
     FeatureDefinitionNotFoundError,
     UnknownSymbolError,
     compute_and_store_features,
 )
+from backend.features.registry import registry
 from backend.features.moving_averages import Sma5
 from backend.features.seed import seed_feature_definitions
 from backend.services.features import FeatureNotFoundError
@@ -156,6 +158,99 @@ async def test_recompute_updates_computed_at_without_duplicates(
     first_by_id = {row.id: row for row in first_rows}
     for row in second_rows:
         assert row.created_at == first_by_id[row.id].created_at
+
+
+@pytest.mark.asyncio
+async def test_recompute_after_bar_change_updates_values(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_definitions(db_session)
+    symbol = await SymbolRepository(db_session).create(symbol="BARCHG")
+    closes = [float(i) for i in range(1, 11)]
+    await _insert_daily_bars(db_session, symbol_id=symbol.id, closes=closes)
+
+    await compute_and_store_features(
+        db_session,
+        symbol.id,
+        "1d",
+        feature_names=["sma_5"],
+    )
+    first_rows = await FeatureValueRepository(db_session).list_by_symbol(symbol.id)
+    changed_ts = datetime(2024, 1, 6, tzinfo=UTC)
+    before = {row.timestamp: row.value for row in first_rows}
+    assert before[changed_ts] == Decimal("4.00000000")
+
+    bar_repo = MarketBarRepository(db_session)
+    new_close = Decimal("100")
+    await bar_repo.upsert(
+        symbol_id=symbol.id,
+        timestamp=changed_ts,
+        timeframe="1d",
+        open=new_close,
+        high=new_close,
+        low=new_close,
+        close=new_close,
+        volume=Decimal("1000000"),
+    )
+
+    await compute_and_store_features(
+        db_session,
+        symbol.id,
+        "1d",
+        feature_names=["sma_5"],
+    )
+    second_rows = await FeatureValueRepository(db_session).list_by_symbol(symbol.id)
+
+    assert len(second_rows) == len(first_rows)
+    assert {row.id for row in second_rows} == {row.id for row in first_rows}
+    after = {row.timestamp: row.value for row in second_rows}
+    expected_after = {
+        datetime(2024, 1, 6, tzinfo=UTC): Decimal("22.80000000"),
+        datetime(2024, 1, 7, tzinfo=UTC): Decimal("23.80000000"),
+        datetime(2024, 1, 8, tzinfo=UTC): Decimal("24.80000000"),
+        datetime(2024, 1, 9, tzinfo=UTC): Decimal("25.80000000"),
+        datetime(2024, 1, 10, tzinfo=UTC): Decimal("26.80000000"),
+    }
+    for ts, expected in expected_after.items():
+        assert after[ts] == expected
+    unchanged_ts = datetime(2024, 1, 5, tzinfo=UTC)
+    assert after[unchanged_ts] == before[unchanged_ts]
+
+
+@pytest.mark.asyncio
+async def test_recompute_all_features_is_idempotent(
+    db_session: AsyncSession,
+) -> None:
+    await _seed_definitions(db_session)
+    symbol = await SymbolRepository(db_session).create(symbol="ALLFEAT")
+    closes = [float(i) for i in range(1, 201)]
+    await _insert_daily_bars(db_session, symbol_id=symbol.id, closes=closes)
+    computed_at = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+
+    first_count = await compute_and_store_features(
+        db_session,
+        symbol.id,
+        "1d",
+        feature_names=None,
+        computed_at=computed_at,
+    )
+    first_rows = await FeatureValueRepository(db_session).list_by_symbol(symbol.id)
+    assert first_count > 0
+    distinct_definition_ids = {row.feature_definition_id for row in first_rows}
+    assert len(distinct_definition_ids) == len(registry.all())
+
+    second_count = await compute_and_store_features(
+        db_session,
+        symbol.id,
+        "1d",
+        feature_names=None,
+        computed_at=computed_at,
+    )
+    second_rows = await FeatureValueRepository(db_session).list_by_symbol(symbol.id)
+
+    assert second_count == first_count
+    assert len(second_rows) == len(first_rows)
+    assert {row.id for row in second_rows} == {row.id for row in first_rows}
 
 
 @pytest.mark.asyncio
