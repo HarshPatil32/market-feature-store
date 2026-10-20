@@ -128,6 +128,7 @@ def _reference_wilder_rsi_via_rs(
             avg_gain = sum(seed_gains) / period
             avg_loss = sum(seed_losses) / period
         else:
+            assert avg_loss is not None
             avg_gain = (avg_gain * (period - 1) + gain) / period
             avg_loss = (avg_loss * (period - 1) + loss) / period
 

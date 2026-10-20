@@ -17,8 +17,8 @@ from backend.features.calculator import (
     UnknownSymbolError,
     compute_and_store_features,
 )
-from backend.features.registry import registry
 from backend.features.moving_averages import Sma5
+from backend.features.registry import registry
 from backend.features.seed import seed_feature_definitions
 from backend.services.features import FeatureNotFoundError
 from backend.storage.repository import (
