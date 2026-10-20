@@ -44,11 +44,15 @@ def test_reference_value_matches_hand_computed() -> None:
     closes_20 = [float(i) for i in range(1, 21)]
     result_20 = PriceVsSma20().compute(_frame(closes_20))
     assert result_20.iloc[:19].isna().all()
-    assert result_20.iloc[19] == pytest.approx((20.0 - 10.5) / 10.5, rel=1e-9, abs=_SERIES_ATOL)
+    assert result_20.iloc[19] == pytest.approx(
+        (20.0 - 10.5) / 10.5, rel=1e-9, abs=_SERIES_ATOL
+    )
 
     closes_21 = [float(i) for i in range(1, 22)]
     result_21 = PriceVsSma20().compute(_frame(closes_21))
-    assert result_21.iloc[20] == pytest.approx((21.0 - 11.5) / 11.5, rel=1e-9, abs=_SERIES_ATOL)
+    assert result_21.iloc[20] == pytest.approx(
+        (21.0 - 11.5) / 11.5, rel=1e-9, abs=_SERIES_ATOL
+    )
 
 
 def test_matches_close_minus_sma_over_sma() -> None:

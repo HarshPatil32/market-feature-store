@@ -42,9 +42,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     too_large = bind.execute(
         sa.text(
-            "SELECT 1 FROM feature_values "
-            "WHERE abs(value) >= 10000000000 "
-            "LIMIT 1"
+            "SELECT 1 FROM feature_values " "WHERE abs(value) >= 10000000000 " "LIMIT 1"
         )
     ).first()
     if too_large is not None:

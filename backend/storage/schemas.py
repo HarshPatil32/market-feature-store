@@ -146,11 +146,7 @@ class ComputeFeaturesRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_datetime_range(self) -> Self:
-        if (
-            self.start is not None
-            and self.end is not None
-            and self.start > self.end
-        ):
+        if self.start is not None and self.end is not None and self.start > self.end:
             raise ValueError("start must be <= end")
         return self
 

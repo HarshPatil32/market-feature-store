@@ -488,8 +488,24 @@ async def test_compute_features_partial_symbol_failure(
 
     real_compute = calculator.compute_and_store_features
 
-    async def _side_effect(session, symbol_id, *args, **kwargs):
-        result = await real_compute(session, symbol_id, *args, **kwargs)
+    async def _side_effect(
+        session: AsyncSession,
+        symbol_id: int,
+        timeframe: str,
+        feature_names: list[str] | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        computed_at: datetime | None = None,
+    ) -> int:
+        result = await real_compute(
+            session,
+            symbol_id,
+            timeframe,
+            feature_names=feature_names,
+            start=start,
+            end=end,
+            computed_at=computed_at,
+        )
         if symbol_id == msft.id:
             raise RuntimeError("boom")
         return result
