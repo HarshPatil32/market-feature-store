@@ -13,6 +13,7 @@ from backend.config import get_settings
 from backend.db import get_db_session
 from backend.ingestion.incremental import incremental_symbols
 from backend.providers.factory import get_market_data_provider
+from backend.services.feature_compute import compute_features_for_symbols
 from backend.services.features import (
     FeatureNotFoundError,
     get_active_feature_version,
@@ -30,6 +31,8 @@ from backend.services.symbols import (
 )
 from backend.storage.models import FeatureDefinition, IngestionRun, Symbol
 from backend.storage.schemas import (
+    ComputeFeaturesRequest,
+    ComputeFeaturesSummary,
     FeatureDefinitionRead,
     IncrementalRunSummary,
     IngestionRunRead,
@@ -79,6 +82,28 @@ async def get_features(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post("/features/compute", response_model=ComputeFeaturesSummary)
+async def compute_features(
+    payload: ComputeFeaturesRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> ComputeFeaturesSummary:
+    try:
+        computed, failed = await compute_features_for_symbols(
+            session,
+            symbols=list(payload.symbols),
+            features=payload.features,
+            timeframe=payload.timeframe,
+            start=payload.start,
+            end=payload.end,
+        )
+    except (SymbolNotFoundError, FeatureNotFoundError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    return ComputeFeaturesSummary(computed=computed, failed=failed)
 
 
 @router.get("/features/{name}/active", response_model=FeatureDefinitionRead)

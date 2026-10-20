@@ -271,7 +271,12 @@ class FeatureValue(Base):
         nullable=False,
     )
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    value: Mapped[Decimal] = mapped_column(Numeric(18, 8), nullable=False)
+    value: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -1,11 +1,38 @@
 """Pydantic schemas for symbol registry request/response contracts."""
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from backend.storage.models import RunStatus
+
+MAX_COMPUTE_SYMBOLS = 20
+MAX_COMPUTE_FEATURES = 100
+
+FeatureName = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=100),
+]
+
+# Mirrors backend.bar.Timeframe; defined here to avoid importing bar (bar imports Ticker).
+ComputeTimeframe = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=10,
+        pattern=r"^[a-zA-Z0-9]+$",
+    ),
+]
 
 
 def _normalize_ticker(value: object) -> str:
@@ -83,6 +110,55 @@ class IncrementalRunSummary(BaseModel):
     succeeded: dict[str, IngestionRunRead] = Field(
         default_factory=dict,
         description="Symbols that completed incremental ingestion successfully.",
+    )
+    failed: dict[str, str] = Field(
+        default_factory=dict,
+        description="Symbols that failed, mapped to an error message.",
+    )
+
+
+class ComputeFeaturesRequest(BaseModel):
+    symbols: list[Ticker] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_COMPUTE_SYMBOLS,
+    )
+    features: list[FeatureName] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_COMPUTE_FEATURES,
+    )
+    timeframe: ComputeTimeframe = "1d"
+    start: AwareDatetime | None = None
+    end: AwareDatetime | None = None
+
+    @field_validator("symbols")
+    @classmethod
+    def dedupe_symbols(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for ticker in value:
+            if ticker in seen:
+                continue
+            seen.add(ticker)
+            ordered.append(ticker)
+        return ordered
+
+    @model_validator(mode="after")
+    def validate_datetime_range(self) -> Self:
+        if (
+            self.start is not None
+            and self.end is not None
+            and self.start > self.end
+        ):
+            raise ValueError("start must be <= end")
+        return self
+
+
+class ComputeFeaturesSummary(BaseModel):
+    computed: dict[str, int] = Field(
+        default_factory=dict,
+        description="Symbols that completed feature computation, mapped to rows upserted.",
     )
     failed: dict[str, str] = Field(
         default_factory=dict,
